@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+env/
+
+# Logs and temp
+*.log
+*.tmp
+launch_out.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+.cursor/
+
+# Build / packaging
+build/
+dist/
+dist_installer/
+packaged/
+release/
+installer/
+*.egg-info/
+*.spec.bak
+
+# Installers and archives (do not commit binaries)
+*.exe
+*.msi
+*.zip
+*.7z
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# User/runtime caches (local-first app data — never commit)
+render_cache/
+thumbnail_cache/
+staging_cache/
+logs/
+**/cache/
+**/thumbs/
+*.cache/
+
+# Local settings / secrets
+local_settings.json
+user_settings.json
+secrets.*
+.env
+.env.*
+
+# Handoff and cleanup archives (generated / local-only trees)
+handoff/
+*_handoff*/
+*_Handoff*/
+_archive_cleanup_*/
+
+# QA temp trees
+TestSource/
+TestDestination/
+
+# Backups
+*.bak
+*.bak*

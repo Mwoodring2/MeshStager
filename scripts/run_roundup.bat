@@ -1,0 +1,3 @@
+@echo off
+echo NOTE: run_roundup.bat is deprecated. Launching MeshStager instead...
+call "%~dp0run_meshstager.bat"
