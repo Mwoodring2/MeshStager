@@ -44,6 +44,7 @@ from meshcorral.utils.path_perf import (
     RemoteThrottleProfile,
     remote_throttle_profile,
 )
+from meshcorral.utils.qt_object_safety import emit_if_alive, is_qobject_alive
 
 if TYPE_CHECKING:
     from meshcorral.ui.file_table_model import FileTableModel
@@ -123,12 +124,16 @@ class _RasterReadyRunnable(QRunnable):
         except (TypeError, ValueError):
             return False
 
+    def _is_cancelled(self) -> bool:
+        """True when the viewport moved on, or the signal target no longer exists."""
+        return self._is_stale() or not is_qobject_alive(self._sigs)
+
     def run(self) -> None:
-        if self._is_stale():
+        if self._is_cancelled():
             return
         paths: list[Path] = []
         for record in self._records:
-            if self._is_stale():
+            if self._is_cancelled():
                 return
             try:
                 if record.path.is_file():
@@ -137,7 +142,7 @@ class _RasterReadyRunnable(QRunnable):
                 continue
         if self._is_stale():
             return
-        self._sigs.paths_ready.emit(paths)
+        emit_if_alive(self._sigs, "paths_ready", paths)
 
 
 class _LoadRunnable(QRunnable):
@@ -174,9 +179,16 @@ class _LoadRunnable(QRunnable):
         except (TypeError, ValueError):
             return False
 
+    def _emit_ready(self, image: QImage | None) -> bool:
+        """Deliver a decode result; False means the controller was torn down."""
+        return emit_if_alive(self._sigs, "image_ready", self._purpose, self._key, self._path, image)
+
     def run(self) -> None:
+        if not is_qobject_alive(self._sigs):
+            # Controller destroyed before this runnable was scheduled: normal teardown.
+            return
         if self._is_stale():
-            self._sigs.image_stale.emit(self._purpose, self._key, int(self._px))
+            emit_if_alive(self._sigs, "image_stale", self._purpose, self._key, int(self._px))
             return
         img: QImage | None = None
 
@@ -215,10 +227,10 @@ class _LoadRunnable(QRunnable):
                 img = QImage(self._path)
             except (OSError, TypeError) as e:
                 logger.debug("QImage load error %s: %s", self._path, e)
-                self._sigs.image_ready.emit(self._purpose, self._key, self._path, None)
+                self._emit_ready(None)
                 return
         if img.isNull():
-            self._sigs.image_ready.emit(self._purpose, self._key, self._path, None)
+            self._emit_ready(None)
             return
 
         # Scale off the UI thread; QPixmap conversion stays on the main thread.
@@ -232,7 +244,7 @@ class _LoadRunnable(QRunnable):
             )
         else:
             img2 = img
-        self._sigs.image_ready.emit(self._purpose, self._key, self._path, img2)
+        self._emit_ready(img2)
 
 
 def _coerce_display_px(px: int) -> int:

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from meshcorral.app.icon_branding import apply_window_icon
+from meshcorral.ui.font_scaling import scale_font_points
 from meshcorral.ui.layout_constants import (
     LARGE_FOLDER_DIALOG_MIN_HEIGHT,
     LARGE_FOLDER_DIALOG_MIN_WIDTH,
@@ -87,8 +88,7 @@ class LargeFolderWarningDialog(ResponsiveModalDialog):
 
         title = QLabel("Large Folder / Server Scan Detected")
         title.setObjectName("DialogTitle")
-        title_font = title.font()
-        title_font.setPointSize(title_font.pointSize() + 2)
+        title_font = scale_font_points(title.font(), 2.0, widget=title)
         title_font.setBold(True)
         title.setFont(title_font)
 

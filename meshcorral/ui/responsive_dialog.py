@@ -38,6 +38,7 @@ from meshcorral.ui.dialog_placement import (
     available_geometry_for_widget,
     center_dialog_over_parent,
     clamp_dialog_size_to_screen,
+    dialog_frame_extra,
 )
 from meshcorral.ui.layout_constants import DIALOG_MIN_WIDTH
 
@@ -129,19 +130,30 @@ def apply_responsive_dialog_geometry(
     *,
     min_width: int,
     min_height: int,
+    parent: QWidget | None = None,
 ) -> None:
-    """Clamp *dialog* size to the current screen work area."""
-    available = available_geometry_for_widget(dialog)
+    """
+    Clamp *dialog* size to the work area of the screen it will appear on.
+
+    Resolves the screen from *parent* (falling back to the dialog's own parent widget)
+    so a dialog opened over a secondary monitor is not sized against the primary one,
+    and deducts the window frame so the title bar and borders stay on screen too.
+    """
+    anchor = parent if parent is not None else dialog.parentWidget()
+    available = available_geometry_for_widget(dialog, anchor)
     if available is None:
         return
     dialog.adjustSize()
     hint = dialog.sizeHint()
+    frame_extra_w, frame_extra_h = dialog_frame_extra(dialog)
     width, height, max_w, max_h, min_w, min_h = clamp_dialog_size_to_screen(
         desired_width=max(min_width, hint.width()),
         desired_height=max(min_height, hint.height()),
         min_width=min_width,
         min_height=min_height,
         available=available,
+        frame_extra_width=frame_extra_w,
+        frame_extra_height=frame_extra_h,
     )
     dialog.setMinimumSize(min_w, min_h)
     dialog.setMaximumSize(max_w, max_h)
@@ -160,6 +172,7 @@ def finalize_responsive_dialog_show(
         dialog,
         min_width=min_width,
         min_height=min_height,
+        parent=parent,
     )
     center_dialog_over_parent(dialog, parent)
 

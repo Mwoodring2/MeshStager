@@ -34,6 +34,7 @@ class IndexedRecord:
     tags: str
     user_tag_set: frozenset[str]
     combined: str
+    collection_names: frozenset[str] = frozenset()
 
 
 def _normalize_extension(ext: str) -> str:
@@ -58,6 +59,7 @@ def build_index_entry(
     record: FileRecord,
     *,
     user_tags: tuple[str, ...] = (),
+    collections: tuple[str, ...] = (),
 ) -> IndexedRecord:
     """Build one index row from a :class:`FileRecord`."""
     name = record.name_lower
@@ -80,6 +82,7 @@ def build_index_entry(
         tags=tags,
         user_tag_set=user_tag_set,
         combined=combined,
+        collection_names=frozenset(name.casefold() for name in collections),
     )
 
 
@@ -163,6 +166,9 @@ def record_matches_query(entry: IndexedRecord, parsed: ParsedQuery) -> bool:
         if not _matches_size(entry, parsed.size_predicate):
             return False
 
+    if parsed.collection_name is not None and parsed.collection_name not in entry.collection_names:
+        return False
+
     if parsed.tag_contains is not None:
         if parsed.tag_contains not in entry.user_tag_set:
             return False
@@ -182,6 +188,7 @@ class SearchIndex:
         self._source_len: int = -1
         self._source_id: int = -1
         self._user_tags_for: object | None = None
+        self._collections_for: object | None = None
 
     @property
     def entries(self) -> list[IndexedRecord]:
@@ -193,34 +200,45 @@ class SearchIndex:
         records: list[FileRecord],
         *,
         user_tags_for: object | None = None,
+        collections_for: object | None = None,
     ) -> None:
         """Rebuild the index from *records*."""
         tag_fn = user_tags_for
         if callable(tag_fn):
             self._entries = [
-                build_index_entry(r, user_tags=tag_fn(r)) for r in records  # type: ignore[misc]
+                build_index_entry(
+                    r, user_tags=tag_fn(r),
+                    collections=collections_for(r) if callable(collections_for) else (),
+                ) for r in records
             ]
         else:
-            self._entries = [build_index_entry(r) for r in records]
+            self._entries = [
+                build_index_entry(
+                    r, collections=collections_for(r) if callable(collections_for) else (),
+                ) for r in records
+            ]
         self._source_len = len(records)
         self._source_id = id(records)
         self._user_tags_for = user_tags_for
+        self._collections_for = collections_for
 
     def rebuild_if_stale(
         self,
         records: list[FileRecord],
         *,
         user_tags_for: object | None = None,
+        collections_for: object | None = None,
     ) -> None:
-        """Rebuild when the working set or tag provider changed."""
+        """Rebuild when the working set or user-metadata providers changed."""
         stale_tags = getattr(self, "_user_tags_for", None) is not user_tags_for
         if (
             not stale_tags
+            and getattr(self, "_collections_for", None) is collections_for
             and id(records) == self._source_id
             and len(records) == self._source_len
         ):
             return
-        self.rebuild(records, user_tags_for=user_tags_for)
+        self.rebuild(records, user_tags_for=user_tags_for, collections_for=collections_for)
 
     def filter_records(
         self,
@@ -229,11 +247,12 @@ class SearchIndex:
         metadata_registry: MetadataSummaryRegistry | None = None,
         *,
         user_tags_for: object | None = None,
+        collections_for: object | None = None,
     ) -> list[FileRecord]:
         """Filter *records* using indexed predicates (rebuilds index when stale)."""
         if parsed.is_empty():
             return list(records)
-        self.rebuild_if_stale(records, user_tags_for=user_tags_for)
+        self.rebuild_if_stale(records, user_tags_for=user_tags_for, collections_for=collections_for)
         path_to_entry = {e.record.path: e for e in self._entries}
         out: list[FileRecord] = []
         for rec in records:
@@ -242,7 +261,10 @@ class SearchIndex:
                 tags: tuple[str, ...] = ()
                 if callable(user_tags_for):
                     tags = user_tags_for(rec)  # type: ignore[misc]
-                entry = build_index_entry(rec, user_tags=tags)
+                entry = build_index_entry(
+                    rec, user_tags=tags,
+                    collections=collections_for(rec) if callable(collections_for) else (),
+                )
             if not record_matches_query(entry, parsed):
                 continue
             summary = (

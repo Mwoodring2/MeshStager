@@ -17,6 +17,7 @@ _KNOWN_PREFIXES = frozenset(
         "folder",
         "name",
         "tag",
+        "collection",
         "size",
         "faces",
         "watertight",
@@ -63,6 +64,7 @@ class ParsedQuery:
     watertight_required: bool | None = None
     archive_members_predicate: IntPredicate | None = None
     tag_contains: str | None = None
+    collection_name: str | None = None
 
     def needs_metadata(self) -> bool:
         """True when matching requires :class:`AssetMetadataSummary` fields."""
@@ -86,6 +88,7 @@ class ParsedQuery:
             and self.watertight_required is None
             and self.archive_members_predicate is None
             and self.tag_contains is None
+            and self.collection_name is None
         )
 
     @staticmethod
@@ -190,6 +193,7 @@ def parse_query(text: str) -> ParsedQuery:
     watertight_required: bool | None = None
     archive_members_predicate: IntPredicate | None = None
     tag_contains: str | None = None
+    collection_name: str | None = None
     saw_structured = False
 
     for token in tokens:
@@ -223,6 +227,10 @@ def parse_query(text: str) -> ParsedQuery:
             folder_contains = value.lower()
         elif key_lower == "name":
             name_contains = value.lower()
+        elif key_lower == "collection":
+            collection_name = value.casefold()
+            if not collection_name:
+                return ParsedQuery.from_plain_text(stripped)
         elif key_lower == "tag":
             tag_contains = normalize_tag_token(value)
             if not tag_contains:
@@ -284,6 +292,7 @@ def parse_query(text: str) -> ParsedQuery:
         watertight_required=watertight_required,
         archive_members_predicate=archive_members_predicate,
         tag_contains=tag_contains,
+        collection_name=collection_name,
     )
 
 

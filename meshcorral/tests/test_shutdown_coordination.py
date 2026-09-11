@@ -203,6 +203,7 @@ class TestMainWindowShutdownCoordinator(unittest.TestCase):
                     "bridge_cancel": 0,
                     "bridge_stop": 0,
                     "enrich": 0,
+                    "enrich_wait_ms": 0,
                     "disconnect_bridge": 0,
                 }
 
@@ -219,8 +220,10 @@ class TestMainWindowShutdownCoordinator(unittest.TestCase):
                 def _bridge_stop() -> None:
                     calls["bridge_stop"] += 1
 
-                def _cancel_enrich() -> None:
+                def _cancel_enrich(*, wait_ms: int = 0) -> None:
+                    # Shutdown passes a bounded join; interactive cancels pass nothing.
                     calls["enrich"] += 1
+                    calls["enrich_wait_ms"] = int(wait_ms)
 
                 def _disconnect_bridge() -> None:
                     calls["disconnect_bridge"] += 1
@@ -242,6 +245,11 @@ class TestMainWindowShutdownCoordinator(unittest.TestCase):
                 self.assertEqual(calls["bridge_cancel"], 1)
                 self.assertEqual(calls["bridge_stop"], 1)
                 self.assertEqual(calls["enrich"], 1)
+                self.assertGreater(
+                    calls["enrich_wait_ms"],
+                    0,
+                    "shutdown must join the enrichment thread before the window is destroyed",
+                )
                 self.assertEqual(calls["disconnect_bridge"], 1)
             finally:
                 window.close()

@@ -559,6 +559,16 @@ class MainWindow(QMainWindow):
         self._settings_service = SettingsService()
         self._native_renderer_health: NativeRendererHealth = check_native_renderer_health()
         self._startup_environment = check_startup_environment(self._settings_service)
+        # Windowed/frozen builds have no console, so record the same readiness lines the
+        # Settings → Environment page shows. Lets support confirm a build from the log.
+        logger.info(
+            "Startup environment | Native renderer: %s | Blender: %s | "
+            "Metadata cache: %s | Thumbnail cache: %s",
+            self._startup_environment.native_renderer,
+            self._startup_environment.blender,
+            self._startup_environment.metadata_cache,
+            self._startup_environment.thumbnail_cache,
+        )
         self._native_degraded_footer_shown = False
         self._layout_manager = LayoutManager()
         self._thumbnail_router = ThumbnailRouter(self._settings_service)
@@ -570,6 +580,8 @@ class MainWindow(QMainWindow):
         self._exporter = ExportService()
         self._tag_service = TagService()
         self._favorite_service = FavoriteService()
+        from meshcorral.ui.collections.collection_controller import CollectionController
+        self._collections = CollectionController(self)
 
         # Guards the Asset Mode handler from clobbering restored state during the
         # construction / restore pass — only user-initiated changes should clear rows.
@@ -732,7 +744,7 @@ class MainWindow(QMainWindow):
         self._search_edit.setPlaceholderText("Search… (e.g. helmet, ext:stl, tag:approved)")
         self._search_edit.setToolTip(
             "Search name, path, folder, extension, type, and your tags. "
-            "Tokens: ext:stl, type:3d, folder:name, name:text, tag:print-ready, size>100mb. "
+            "Tokens: ext:stl, type:3d, folder:name, name:text, tag:print-ready, collection:\"Print Ready\", size>100mb. "
             "Works with Type, Ext, and Folder filters (all must match)."
         )
 
@@ -821,7 +833,8 @@ class MainWindow(QMainWindow):
         self._geometry_meta_thread = QThread(self)
         self._geometry_meta_runner.moveToThread(self._geometry_meta_thread)
         self._geometry_meta_runner.summary_ready.connect(self._on_geometry_metadata_ready)
-        self._geometry_meta_thread.start()
+        # Started lazily by :meth:`_ensure_geometry_metadata_thread` on the first mesh
+        # selection, so a window that is never used owns no running thread to outlive it.
 
         self._search_edit.textChanged.connect(self._on_search_text_changed)
 
@@ -879,6 +892,7 @@ class MainWindow(QMainWindow):
         self._is_initializing_ui = False
         self._wire_tag_ui()
         self._wire_favorite_ui()
+        self._collections.wire()
 
     def _wire_favorite_ui(self) -> None:
         """Connect Tier 2.2 favorite star toggle."""
@@ -892,6 +906,7 @@ class MainWindow(QMainWindow):
         self._favorite_service.set_favorite(records[0].path, favorite=favorited)
         self._apply_filters(refresh_inspector=False)
         self._refresh_favorite_toggle_for_selection()
+        self._collections.refresh_selection()
 
     def _refresh_favorite_toggle_for_selection(self) -> None:
         records = self.selected_records()
@@ -1406,6 +1421,8 @@ class MainWindow(QMainWindow):
         self._reset_filters_btn.clicked.connect(self._reset_filters)
         left_v.addWidget(self._reset_filters_btn)
 
+        left_v.addSpacing(LEFT_SECTION_BREAK)
+        left_v.addWidget(self._collections.sidebar)
         left_v.addStretch(1)
         return left_frame
 
@@ -1883,6 +1900,7 @@ class MainWindow(QMainWindow):
             self._update_asset_inspector()
         self._refresh_tag_editor_for_selection()
         self._refresh_favorite_toggle_for_selection()
+        self._collections.refresh_selection()
         self._sync_center_welcome_vs_browser()
         self._refresh_status_counts_strip()
 
@@ -2021,11 +2039,27 @@ class MainWindow(QMainWindow):
         self._metadata_registry.put(base)
         return base
 
+    def _ensure_geometry_metadata_thread(self) -> bool:
+        """Start the geometry worker thread on first use; True when it is running."""
+        thr = self._geometry_meta_thread
+        if thr is None:
+            return False
+        try:
+            if not thr.isRunning():
+                thr.start()
+            return True
+        except RuntimeError:
+            logger.debug("geometry metadata thread unavailable; skipping background stats")
+            self._geometry_meta_thread = None
+            return False
+
     def _schedule_geometry_metadata(self, record: FileRecord) -> None:
         """Queue background STL/OBJ geometry stats for the inspector selection."""
         if self._shutting_down or self._geometry_meta_runner is None:
             return
         if not is_mesh_geometry_extension(record.extension or record.path.suffix):
+            return
+        if not self._ensure_geometry_metadata_thread():
             return
         path_s = str(record.path)
         if self._geometry_meta_path_pending == path_s:
@@ -2082,17 +2116,31 @@ class MainWindow(QMainWindow):
         if len(recs) == 1 and str(recs[0].path) == path_s:
             self._update_asset_inspector()
 
-    def _stop_geometry_metadata_thread(self) -> None:
-        """Stop the geometry metadata worker thread during shutdown."""
+    def _stop_geometry_metadata_thread(self, *, wait_ms: int = 3000) -> None:
+        """
+        Stop the geometry metadata worker thread during shutdown.
+
+        The thread is a child of this window, so it must be finished before Qt destroys
+        the window — otherwise Qt logs ``QThread: Destroyed while thread is still
+        running`` and the runner is torn down under the worker's feet.
+        """
         thr = self._geometry_meta_thread
         self._geometry_meta_thread = None
         self._geometry_meta_runner = None
-        if thr is not None:
-            try:
-                thr.quit()
-                thr.wait(3000)
-            except RuntimeError:
-                logger.debug("geometry metadata thread already stopped")
+        if thr is None:
+            return
+        try:
+            if not thr.isRunning():
+                return
+            thr.requestInterruption()
+            thr.quit()
+            if not thr.wait(max(0, int(wait_ms))):
+                logger.info(
+                    "MeshStager shutdown: geometry metadata thread did not quit within %s ms",
+                    wait_ms,
+                )
+        except RuntimeError:
+            logger.debug("geometry metadata thread already stopped")
 
     def _update_asset_inspector(self) -> None:
         """Fill the asset inspector from the current selection (table or gallery)."""
@@ -2668,6 +2716,12 @@ class MainWindow(QMainWindow):
         """Secondary line under the current-view header (filter / empty states)."""
         total = len(self._all_records)
         visible = len(self._view_records)
+
+        collection_spec = self._collections.empty_spec() if visible == 0 else None
+        if collection_spec is not None:
+            self._view_hint_label.setText(empty_state_hint_lines(collection_spec))
+            self._view_hint_label.show()
+            return
 
         if not self._current_source:
             self._view_hint_label.hide()
@@ -3702,6 +3756,7 @@ class MainWindow(QMainWindow):
             "thumb_health_for": self._lazy_thumb_health.thumb_health,
             "favorite_filter": self._favorite_filter_combo.currentText(),
             "is_favorite_for": self._favorite_service.is_favorite_record,
+            "collection_filter": self._collections.filter_predicate(),
         }
 
     def _scan_filter_kwargs(self) -> dict[str, object]:
@@ -4053,12 +4108,16 @@ class MainWindow(QMainWindow):
             except (RuntimeError, TypeError):
                 logger.debug("bridge signal disconnect skipped")
 
-    def _cancel_active_enrichment(self) -> None:
+    def _cancel_active_enrichment(self, *, wait_ms: int = 0) -> None:
         """Signal any running enrichment runner to stop and forget the handles.
 
         Defensive against already-deleted C++ proxies — natural completion can
         race the next scan click, leaving stale Python handles pointing at
         destroyed ``QThread`` / runner instances.
+
+        *wait_ms* is 0 for interactive cancels (starting a new scan must not block the
+        UI thread); shutdown passes a bounded wait so the thread — a child of this
+        window — has actually finished before Qt destroys it.
         """
         self._disconnect_enrichment_signals()
         runner = self._enrichment_runner
@@ -4077,7 +4136,13 @@ class MainWindow(QMainWindow):
                 running = False
             if running:
                 try:
+                    thr.requestInterruption()
                     thr.quit()
+                    if wait_ms > 0 and not thr.wait(int(wait_ms)):
+                        logger.info(
+                            "MeshStager shutdown: enrichment thread did not quit within %s ms",
+                            wait_ms,
+                        )
                 except RuntimeError:
                     logger.debug("enrichment thread quit raised after delete")
         self._enrichment_runner = None
@@ -4743,6 +4808,7 @@ class MainWindow(QMainWindow):
 
         query_text = self._search_edit.text()
         combo_kwargs = self._combo_filter_kwargs()
+        combo_kwargs["collections_for"] = self._collections.search_provider()
         self._filter_refresh_inspector_pending = refresh_inspector
 
         if len(self._all_records) >= ASYNC_FILTER_THRESHOLD:
@@ -4855,6 +4921,7 @@ class MainWindow(QMainWindow):
         self._update_asset_inspector()
         self._refresh_tag_editor_for_selection()
         self._refresh_favorite_toggle_for_selection()
+        self._collections.refresh_selection()
 
     def _update_move_summary(self) -> None:
         # Match move_service.build_move_plan: one plan row per unique path.
@@ -4945,8 +5012,12 @@ class MainWindow(QMainWindow):
         except (RuntimeError, AttributeError) as exc:
             logger.debug("thumb refresh accumulator cancel failed: %s", exc)
 
-        self._cancel_active_enrichment()
+        self._cancel_active_enrichment(wait_ms=2_000)
         self._stop_geometry_metadata_thread()
+
+        collections = getattr(self, "_collections", None)
+        if collections is not None:
+            collections.close()
 
         tag_svc = getattr(self, "_tag_service", None)
         if tag_svc is not None:
@@ -5248,6 +5319,7 @@ class MainWindow(QMainWindow):
         self.folder_combo.setCurrentText("All Folders")
         self._thumb_filter_combo.setCurrentText(THUMB_FILTER_ALL)
         self._favorite_filter_combo.setCurrentText(FAVORITE_FILTER_ALL)
+        self._collections.sidebar.reset()
         self.category_combo.blockSignals(False)
         self.extension_combo.blockSignals(False)
         self.folder_combo.blockSignals(False)
@@ -6288,6 +6360,7 @@ class MainWindow(QMainWindow):
             else:
                 action.setEnabled(False)
             menu.addAction(action)
+        self._collections.add_context_actions(menu)
         return menu
 
     def _open_in_blender(self) -> None:

@@ -131,6 +131,10 @@ class InspectorTabbedPanel(QWidget):
         """User tag editor on the Metadata tab."""
         return self._metadata.tag_editor
 
+    def collection_editor(self):
+        """Collection membership controls in Metadata."""
+        return self._metadata.collection_editor
+
     def favorite_toggle(self):
         """Favorite star on the Metadata tab."""
         return self._metadata.favorite_toggle

@@ -13,6 +13,8 @@ FRESH_LAUNCH = "fresh_launch"
 READY_TO_SCAN = "ready_to_scan"
 NO_ASSETS_FOUND = "no_assets_found"
 NO_MATCHING_RESULTS = "no_matching_results"
+COLLECTION_EMPTY = "collection_empty"
+COLLECTION_UNAVAILABLE = "collection_unavailable"
 NO_SELECTION = "no_selection"
 MULTI_SELECTION = "multi_selection"
 PREVIEW_UNAVAILABLE = "preview_unavailable"
@@ -55,6 +57,16 @@ _EMPTY_STATE_SPECS: dict[str, EmptyStateSpec] = {
         body="Try clearing filters or using a broader search.",
         action_text="Use Reset Filters or clear the name search.",
         token=NO_MATCHING_RESULTS,
+    ),
+    COLLECTION_EMPTY: EmptyStateSpec(
+        title="This collection is empty",
+        body="Add assets from the browser to get started.",
+        token=COLLECTION_EMPTY,
+    ),
+    COLLECTION_UNAVAILABLE: EmptyStateSpec(
+        title="No collection assets in this source",
+        body="Collection members are outside the currently loaded assets. Membership is preserved.",
+        token=COLLECTION_UNAVAILABLE,
     ),
     NO_SELECTION: EmptyStateSpec(
         title="Select an asset",

@@ -2,6 +2,17 @@
 
 > Historical entries may reference **Roundup** (pre-rebrand product name).
 
+## Tier 2.3 — Collections (2026-09-11)
+
+- Persistent, manually curated collections in a separate `asset_collections.sqlite` store.
+- Create, rename, and confirm deletion; assets remain untouched on disk.
+- Sidebar filtering over loaded assets, counts, Metadata membership controls, and bulk
+  add/remove through the shared gallery/table context menu.
+- Exact case-insensitive `collection:"Name"` search composes with Tags, Favorites, and
+  existing filters without rescanning or changing the source or asset mode.
+- Missing paths retain membership; responsive dialogs and existing lifecycle wiring.
+- Documentation: `docs/TIER2_COLLECTIONS.md`. Displayed version remains `0.1.0-rc1`.
+
 ## v1.0.0 — Prime core freeze + Tags MVP (2026-05-27)
 
 ### Prime v1.0 core freeze — completed

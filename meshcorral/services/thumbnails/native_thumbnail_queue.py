@@ -18,6 +18,7 @@ from meshcorral.app.bridge.job_models import BridgeJobResult, BridgeJobStatus
 from meshcorral.app.bridge.thumb_index import _norm_path_key
 from meshcorral.services.environment.native_renderer_health import get_native_renderer_health
 from meshcorral.services.thumbnails.thumbnail_router import ThumbnailRouter
+from meshcorral.utils.qt_object_safety import emit_if_alive, is_qobject_alive
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,10 @@ class _NativeThumbRunnable(QRunnable):
         self._high_quality = bool(high_quality)
 
     def run(self) -> None:
+        if not is_qobject_alive(self._manager):
+            # Queue manager destroyed before this job ran: normal teardown, not an error.
+            logger.debug("native thumbnail job %s cancelled: manager gone", self._job_id)
+            return
         result, geometry_summary = self._manager._router.generate_native_to_cache(
             self._source_path,
             job_id=self._job_id,
@@ -67,6 +72,9 @@ class _NativeThumbRunnable(QRunnable):
             for_auto_enqueue=self._for_auto_enqueue,
             high_quality=self._high_quality,
         )
+        if not is_qobject_alive(self._manager):
+            logger.debug("native thumbnail job %s finished after manager teardown", self._job_id)
+            return
         self._manager._finish_job(self._source_path, result, geometry_summary)
 
 
@@ -186,10 +194,7 @@ class NativeThumbnailQueueManager(QObject):
             self._active_count = max(0, self._active_count - 1)
             if geometry_summary is not None:
                 self._geometry_by_key[key] = geometry_summary
-        try:
-            self.job_completed.emit(result)
-        except RuntimeError:
-            logger.debug("native job_completed emit aborted: signal source deleted")
+        emit_if_alive(self, "job_completed", result)
 
     @Slot(object)
     def _deliver_result(self, result: object) -> None:

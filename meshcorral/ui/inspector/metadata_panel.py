@@ -7,6 +7,7 @@ from PySide6.QtGui import QFont
 from meshcorral.ui.empty_states import METADATA_DEFERRED, empty_state_spec, make_empty_state_widget
 from meshcorral.ui.favorites.favorite_toggle_widget import FavoriteToggleWidget
 from meshcorral.ui.tags.tag_editor_widget import TagEditorWidget
+from meshcorral.ui.collections.collection_widgets import CollectionEditor
 from PySide6.QtWidgets import (
     QApplication,
     QFormLayout,
@@ -111,6 +112,9 @@ class MetadataPanel(QWidget):
 
         self._tag_editor = TagEditorWidget()
         root.addWidget(self._tag_editor)
+
+        self.collection_editor = CollectionEditor()
+        root.addWidget(self.collection_editor)
 
         meta_hdr = QLabel("Metadata block")
         meta_hdr.setObjectName("PanelSubTitle")

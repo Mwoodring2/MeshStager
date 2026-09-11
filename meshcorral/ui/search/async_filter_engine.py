@@ -14,6 +14,7 @@ from meshcorral.services.metadata.metadata_summary_registry import MetadataSumma
 from meshcorral.services.search_service import filter_records
 from meshcorral.ui.search.query_parser import parse_query
 from meshcorral.ui.search.search_index import SearchIndex
+from meshcorral.utils.qt_object_safety import is_qobject_alive
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,8 @@ def compute_filtered_records(
     user_tags_for: Callable[[FileRecord], tuple[str, ...]] | None = None,
     favorite_filter: str | None = None,
     is_favorite_for: Callable[[FileRecord], bool] | None = None,
+    collection_filter: Callable[[FileRecord], bool] | None = None,
+    collections_for: Callable[[FileRecord], tuple[str, ...]] | None = None,
 ) -> list[FileRecord]:
     """
     Apply combo filters (extension, folder, category, asset mode, thumb health)
@@ -64,16 +67,18 @@ def compute_filtered_records(
         thumb_health_for=thumb_health_for,
         favorite_filter=favorite_filter or FAVORITE_FILTER_ALL,
         is_favorite_for=is_favorite_for,
+        collection_filter=collection_filter,
     )
     parsed = parse_query(query_text)
     if parsed.is_empty():
         return combo
-    search_index.rebuild_if_stale(all_records, user_tags_for=user_tags_for)
+    search_index.rebuild_if_stale(all_records, user_tags_for=user_tags_for, collections_for=collections_for)
     return search_index.filter_records(
         combo,
         parsed,
         metadata_registry,
         user_tags_for=user_tags_for,
+        collections_for=collections_for,
     )
 
 
@@ -99,13 +104,18 @@ class _FilterRunnable(QRunnable):
         self._snapshot = snapshot
         self._kwargs = kwargs
         self._query_text = query_text
-        self._index = index
+        # Collection providers capture a generation. Do not let overlapping
+        # requests overwrite each other's mutable index with different snapshots.
+        self._index = SearchIndex() if "collections_for" in kwargs else index
         self._active_epoch_fn = active_epoch_fn
         self._metadata_registry = metadata_registry
         self._user_tags_for = user_tags_for
 
     @Slot()
     def run(self) -> None:
+        if not is_qobject_alive(self._engine):
+            logger.debug("search filter cancelled (engine torn down before epoch %s)", self._epoch)
+            return
         if self._active_epoch_fn() != self._epoch:
             logger.debug("search filter cancelled (epoch %s stale at start)", self._epoch)
             return
@@ -124,6 +134,9 @@ class _FilterRunnable(QRunnable):
         if self._active_epoch_fn() != self._epoch:
             logger.debug("search filter cancelled (epoch %s stale at end)", self._epoch)
             return
+        if not is_qobject_alive(self._engine):
+            logger.debug("search filter cancelled (engine torn down during epoch %s)", self._epoch)
+            return
         self._engine._stash_worker_result(
             FilterRunResult(
                 epoch=self._epoch,
@@ -131,12 +144,15 @@ class _FilterRunnable(QRunnable):
                 match_count=len(records),
             )
         )
-        QMetaObject.invokeMethod(
-            self._engine,
-            "_deliver_worker_result",
-            Qt.ConnectionType.QueuedConnection,
-            Q_ARG(int, self._epoch),
-        )
+        try:
+            QMetaObject.invokeMethod(
+                self._engine,
+                "_deliver_worker_result",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(int, self._epoch),
+            )
+        except RuntimeError as exc:
+            logger.debug("search filter delivery cancelled during teardown: %s", exc)
 
 
 class AsyncFilterEngine(QObject):

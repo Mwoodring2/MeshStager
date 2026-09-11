@@ -36,6 +36,12 @@ def _ensure_qapp() -> QApplication:
 
 
 class TestLargeFolderAssessment(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Several cases here construct LargeFolderWarningDialog; building a QWidget
+        # without a QApplication is a Qt fatal (0xC0000409) rather than a test failure.
+        cls._app = _ensure_qapp()
+
     def test_unc_path_triggers_network_reason(self) -> None:
         path = Path(r"\\server\share\assets")
         with mock.patch(

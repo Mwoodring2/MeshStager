@@ -15,10 +15,14 @@ from PySide6.QtWidgets import QApplication, QDialog, QMainWindow
 from meshcorral.models.move_plan import MovePlan
 from meshcorral.services.settings_service import SettingsService
 from meshcorral.ui.dialog_placement import (
+    SETTINGS_DIALOG_HORIZONTAL_MARGIN,
     SETTINGS_DIALOG_VERTICAL_MARGIN,
     available_geometry_for_widget,
     center_dialog_over_parent,
     clamp_dialog_size_to_screen,
+    clamp_frame_rect_to_available,
+    dialog_frame_extra,
+    screen_for_dialog,
 )
 from meshcorral.ui.dialogs import MovePreviewDialog
 from meshcorral.ui.large_folder_warning_dialog import LargeFolderWarningDialog
@@ -68,16 +72,26 @@ class TestCenterDialogOverParent(unittest.TestCase):
             )
 
     def test_clamp_moves_dialog_onscreen_when_parent_near_edge(self) -> None:
+        """A parent pushed against the right edge still yields a fully on-screen dialog.
+
+        The clamp target is the screen the *parent* occupies, which on a multi-monitor
+        desktop is not necessarily the primary screen.
+        """
         screen = QApplication.primaryScreen()
         if screen is None:
             self.skipTest("no primary screen")
-        available = screen.availableGeometry()
+        primary = screen.availableGeometry()
         parent = QMainWindow()
-        parent.setGeometry(available.right() - 120, available.top() + 40, 500, 400)
+        parent.setGeometry(primary.right() - 120, primary.top() + 40, 500, 400)
         parent.show()
         dialog = QDialog(parent)
         dialog.resize(480, 360)
         center_dialog_over_parent(dialog, parent)
+
+        available = available_geometry_for_widget(dialog, parent)
+        self.assertIsNotNone(available)
+        if available is None:
+            return
         moved = dialog.frameGeometry()
         self.assertGreaterEqual(moved.left(), available.left())
         self.assertGreaterEqual(moved.top(), available.top())
@@ -98,6 +112,124 @@ class TestClampDialogSizeToScreen(unittest.TestCase):
         self.assertLessEqual(height, available.height())
         self.assertLessEqual(height, available.height() - SETTINGS_DIALOG_VERTICAL_MARGIN)
         self.assertEqual(max_h, available.height() - SETTINGS_DIALOG_VERTICAL_MARGIN)
+
+
+class TestClampFrameRectToAvailable(unittest.TestCase):
+    """Pure-geometry clamp, exercised on synthetic multi-monitor coordinate spaces.
+
+    Real monitor layouts vary per developer machine, so the four-edge and
+    secondary-monitor cases are driven from explicit rectangles instead of whatever
+    screens happen to be attached.
+    """
+
+    #: Primary, a monitor to the right (positive offset), and one to the left (negative x).
+    WORK_AREAS = {
+        "primary": QRect(0, 0, 1920, 1040),
+        "right-secondary": QRect(1920, -180, 2560, 1400),
+        "left-secondary": QRect(-1600, 120, 1600, 860),
+    }
+
+    def _assert_inside(self, rect: QRect, available: QRect) -> None:
+        self.assertGreaterEqual(rect.left(), available.left())
+        self.assertGreaterEqual(rect.top(), available.top())
+        self.assertLessEqual(rect.right(), available.right())
+        self.assertLessEqual(rect.bottom(), available.bottom())
+
+    def test_dialog_pulled_back_from_every_edge(self) -> None:
+        dialog_w, dialog_h = 720, 560
+        for name, available in self.WORK_AREAS.items():
+            overhangs = {
+                "left": QRect(available.left() - 400, available.center().y(), dialog_w, dialog_h),
+                "right": QRect(available.right() - 60, available.center().y(), dialog_w, dialog_h),
+                "top": QRect(available.center().x(), available.top() - 300, dialog_w, dialog_h),
+                "bottom": QRect(
+                    available.center().x(), available.bottom() - 40, dialog_w, dialog_h
+                ),
+            }
+            for edge, target in overhangs.items():
+                with self.subTest(screen=name, edge=edge):
+                    clamped = clamp_frame_rect_to_available(target, available)
+                    self._assert_inside(clamped, available)
+                    self.assertEqual(clamped.size(), target.size())
+
+    def test_oversized_dialog_shrinks_to_work_area(self) -> None:
+        for name, available in self.WORK_AREAS.items():
+            with self.subTest(screen=name):
+                target = QRect(
+                    available.left() - 500,
+                    available.top() - 500,
+                    available.width() + 900,
+                    available.height() + 900,
+                )
+                clamped = clamp_frame_rect_to_available(target, available)
+                self._assert_inside(clamped, available)
+                self.assertEqual(clamped.width(), available.width())
+                self.assertEqual(clamped.height(), available.height())
+
+    def test_centering_on_secondary_monitor_keeps_negative_coordinates(self) -> None:
+        """A left-hand monitor uses negative x; the clamp must not snap back to 0."""
+        available = self.WORK_AREAS["left-secondary"]
+        target = QRect(available.center().x() - 300, available.center().y() - 200, 600, 400)
+        clamped = clamp_frame_rect_to_available(target, available)
+        self._assert_inside(clamped, available)
+        self.assertLess(clamped.left(), 0)
+
+    def test_frame_extra_is_deducted_from_size_limits(self) -> None:
+        """Title bar + borders come out of the budget so the *frame* fits."""
+        available = self.WORK_AREAS["right-secondary"]
+        _w, height, _max_w, max_h, _min_w, _min_h = clamp_dialog_size_to_screen(
+            desired_width=4000,
+            desired_height=4000,
+            min_width=SETTINGS_DIALOG_MIN_WIDTH,
+            min_height=SETTINGS_DIALOG_MIN_HEIGHT,
+            available=available,
+            frame_extra_width=16,
+            frame_extra_height=39,
+        )
+        self.assertEqual(max_h, available.height() - SETTINGS_DIALOG_VERTICAL_MARGIN - 39)
+        self.assertLessEqual(
+            height + 39,
+            available.height() - SETTINGS_DIALOG_VERTICAL_MARGIN,
+        )
+
+    def test_tiny_work_area_still_returns_positive_size(self) -> None:
+        """A work area smaller than the margins must not produce a zero/negative size."""
+        width, height, max_w, max_h, min_w, min_h = clamp_dialog_size_to_screen(
+            desired_width=SETTINGS_DIALOG_MIN_WIDTH,
+            desired_height=SETTINGS_DIALOG_MIN_HEIGHT,
+            min_width=SETTINGS_DIALOG_MIN_WIDTH,
+            min_height=SETTINGS_DIALOG_MIN_HEIGHT,
+            available=QRect(0, 0, 20, 20),
+            frame_extra_width=16,
+            frame_extra_height=39,
+        )
+        for value in (width, height, max_w, max_h, min_w, min_h):
+            self.assertGreater(value, 0)
+
+
+class TestScreenResolution(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = _ensure_qapp()
+
+    def test_unmapped_dialog_inherits_parent_screen(self) -> None:
+        """Before mapping, a dialog reports the primary screen; the parent must win."""
+        parent = QMainWindow()
+        parent.setGeometry(120, 120, 800, 600)
+        parent.show()
+        dialog = QDialog(parent)
+        self.assertIs(screen_for_dialog(dialog, parent), parent.screen())
+
+    def test_parentless_dialog_falls_back_to_a_screen(self) -> None:
+        dialog = QDialog()
+        self.assertIsNotNone(screen_for_dialog(dialog, None))
+
+    def test_frame_extra_is_never_negative(self) -> None:
+        dialog = QDialog()
+        dialog.resize(320, 240)
+        extra_w, extra_h = dialog_frame_extra(dialog)
+        self.assertGreaterEqual(extra_w, 0)
+        self.assertGreaterEqual(extra_h, 0)
 
 
 class TestResponsiveModalDialogBase(unittest.TestCase):
@@ -199,20 +331,91 @@ class TestSettingsDialogResponsiveLayout(unittest.TestCase):
         self.assertEqual(saved, [True])
 
     def test_center_clamp_keeps_settings_dialog_on_screen(self) -> None:
+        """Bottom-right parent: the Settings frame stays inside its own screen's work area."""
         screen = QApplication.primaryScreen()
         if screen is None:
             self.skipTest("no primary screen")
-        available = screen.availableGeometry()
+        primary = screen.availableGeometry()
         parent = QMainWindow()
-        parent.setGeometry(available.right() - 100, available.bottom() - 120, 640, 480)
+        parent.setGeometry(primary.right() - 100, primary.bottom() - 120, 640, 480)
         parent.show()
         dlg = self._make_dialog(parent)
         dlg.show()
+
+        available = available_geometry_for_widget(dlg, parent)
+        self.assertIsNotNone(available)
+        if available is None:
+            return
         frame = dlg.frameGeometry()
         self.assertGreaterEqual(frame.left(), available.left())
         self.assertGreaterEqual(frame.top(), available.top())
         self.assertLessEqual(frame.right(), available.right() + 1)
         self.assertLessEqual(frame.bottom(), available.bottom() + 1)
+
+    def test_settings_dialog_clamped_for_parent_at_each_screen_edge(self) -> None:
+        """Save/Cancel stay reachable with the parent hugging every screen edge."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.skipTest("no primary screen")
+        primary = screen.availableGeometry()
+        corners = {
+            "top-left": (primary.left(), primary.top()),
+            "top-right": (primary.right() - 200, primary.top()),
+            "bottom-left": (primary.left(), primary.bottom() - 200),
+            "bottom-right": (primary.right() - 200, primary.bottom() - 200),
+        }
+        for label, (x, y) in corners.items():
+            with self.subTest(edge=label):
+                parent = QMainWindow()
+                parent.setGeometry(x, y, 600, 450)
+                parent.show()
+                dlg = self._make_dialog(parent)
+                dlg.show()
+
+                available = available_geometry_for_widget(dlg, parent)
+                self.assertIsNotNone(available)
+                if available is None:
+                    continue
+                frame = dlg.frameGeometry()
+                self.assertGreaterEqual(frame.left(), available.left())
+                self.assertGreaterEqual(frame.top(), available.top())
+                self.assertLessEqual(frame.right(), available.right() + 1)
+                self.assertLessEqual(frame.bottom(), available.bottom() + 1)
+                self.assertTrue(
+                    dlg._button_box.button(dlg._button_box.StandardButton.Save).isVisible()
+                )
+                self.assertTrue(
+                    dlg._button_box.button(dlg._button_box.StandardButton.Cancel).isVisible()
+                )
+                dlg.close()
+                parent.close()
+
+    def test_settings_dialog_sized_for_parent_screen_not_primary(self) -> None:
+        """Sizing must use the parent's screen work area, not the primary screen's."""
+        screens = QApplication.screens()
+        secondary = next(
+            (s for s in screens if s is not QApplication.primaryScreen()),
+            None,
+        )
+        if secondary is None:
+            self.skipTest("single-monitor host; covered synthetically by clamp tests")
+        available = secondary.availableGeometry()
+        parent = QMainWindow()
+        parent.setGeometry(available.left() + 20, available.top() + 20, 700, 500)
+        parent.show()
+        dlg = self._make_dialog(parent)
+        dlg.show()
+
+        self.assertIs(screen_for_dialog(dlg, parent), secondary)
+        frame_extra_w, frame_extra_h = dialog_frame_extra(dlg)
+        self.assertLessEqual(
+            dlg.height() + frame_extra_h,
+            available.height() - SETTINGS_DIALOG_VERTICAL_MARGIN,
+        )
+        self.assertLessEqual(
+            dlg.width() + frame_extra_w,
+            available.width() - SETTINGS_DIALOG_HORIZONTAL_MARGIN,
+        )
 
 
 class TestLargeFolderWarningResponsiveLayout(unittest.TestCase):

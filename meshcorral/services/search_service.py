@@ -25,6 +25,7 @@ def filter_records(
     thumb_health_for: Callable[[FileRecord], ThumbHealth] | None = None,
     favorite_filter: str = FAVORITE_FILTER_ALL,
     is_favorite_for: Callable[[FileRecord], bool] | None = None,
+    collection_filter: Callable[[FileRecord], bool] | None = None,
 ) -> list[FileRecord]:
     """
     Filter by category, extension, parent folder name, optional name search text,
@@ -43,6 +44,9 @@ def filter_records(
 
     filtered: list[FileRecord] = []
     for record in records:
+        if collection_filter is not None and not collection_filter(record):
+            continue
+
         if record.extension not in allowed_extensions:
             continue
 
