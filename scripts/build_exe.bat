@@ -4,22 +4,23 @@ setlocal
 cd /d "%~dp0\.."
 
 echo Building MeshStager...
-echo Entry: run_frozen.py ^(equivalent to python -m meshcorral.app^)
+echo Spec: MeshStager.spec ^(entry run_frozen.py, equivalent to python -m meshcorral.app^)
 echo.
 
-rem PyInstaller's -m is for Windows manifest, not a Python module. Use run_frozen.py.
-rem If Qt plugins are missing on a target PC, add: --collect-all PySide6 ^
+rem MeshStager.spec is the canonical build input: it owns the entry point, icon, windowed
+rem mode, onedir layout, and the SciPy hidden imports the native renderer needs. The
+rem release build (scripts\build_shareable_windows.py) uses the same spec.
 
-rem Icon: assets/icons/MeshStager_icon.ico (multi-size, Explorer / taskbar / Alt+Tab).
-python -m PyInstaller ^
+rem Prefer the repo venv: PyInstaller can only bundle what the build interpreter imports,
+rem so a bare "python" on PATH without SciPy silently produces a crippled bundle.
+set "PYI_PYTHON=python"
+if exist ".venv\Scripts\python.exe" set "PYI_PYTHON=.venv\Scripts\python.exe"
+echo Build interpreter: %PYI_PYTHON%
+
+"%PYI_PYTHON%" -m PyInstaller ^
   --noconfirm ^
   --clean ^
-  --onedir ^
-  --windowed ^
-  --name MeshStager ^
-  --icon assets\icons\MeshStager_icon.ico ^
-  --paths . ^
-  run_frozen.py
+  MeshStager.spec
 
 if exist "README_FIRST.txt" copy /y "README_FIRST.txt" "dist\MeshStager\README_FIRST.txt" >nul
 

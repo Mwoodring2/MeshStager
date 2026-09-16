@@ -9,7 +9,11 @@ For RC3, use a **portable ZIP** first — not an installer. Testers can unzip, r
 ## Prerequisites
 
 1. Repo `.venv` with app dependencies installed (`pip install -r requirements.txt`).
-2. **PyInstaller** available on PATH (system Python) or in the venv (`pip install pyinstaller` or `requirements-dev.txt`).
+2. **PyInstaller** installed **in that same venv** (`pip install -r requirements-dev.txt`).
+   PyInstaller can only freeze what the interpreter running it can import, so the build must run in
+   the environment that has PySide6, numpy, Pillow, trimesh, and SciPy. The script tries the repo
+   venv first and aborts if no available interpreter has the full set — a `python` on PATH with
+   PyInstaller but no SciPy is what shipped the RC3 bundle whose native renderer was unavailable.
 3. Git optional — commit hash is recorded in `VERSION.txt` when available.
 
 ---
@@ -28,7 +32,15 @@ Or:
 scripts\build_shareable_windows.bat
 ```
 
-The script runs quick unit validation, then PyInstaller (`run_frozen.py` onedir → `dist/MeshStager/`).
+The script runs quick unit validation, then builds from **`MeshStager.spec`** (onedir →
+`dist/MeshStager/`). The spec is the single source of truth for the entry point (`run_frozen.py`),
+icon, windowed mode, and the SciPy hidden imports the native renderer needs; `scripts/build_exe.bat`
+builds from the same spec.
+
+Before packaging, the script verifies that `dist/MeshStager/_internal/` actually contains `numpy`,
+`PIL`, `trimesh`, and `scipy` (plus `scipy/sparse` and `scipy/spatial`) and aborts if any are
+missing, so an incomplete bundle cannot become a release ZIP. `meshcorral/tests/test_release_packaging.py`
+guards the same rules without running PyInstaller.
 
 ---
 
