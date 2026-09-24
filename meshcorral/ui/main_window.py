@@ -155,6 +155,12 @@ from meshcorral.services.thumbnails.native_thumbnail_queue import (
     NativeEnqueueReject,
     NativeThumbnailQueueManager,
 )
+from meshcorral.services.thumbnails.nonrenderable_thumbs import (
+    classify_non_renderable_result,
+    fingerprint_for_path,
+    is_tracked_non_renderable_extension,
+    non_renderable_blocks_auto_enqueue,
+)
 from meshcorral.services.thumbnails.thumbnail_router import ThumbnailRouter
 from meshcorral.services.thumbnails.thumbnail_routing_policy import (
     ThumbnailManualOverride,
@@ -265,6 +271,7 @@ from meshcorral.ui.thumbnails.thumbnail_ux_copy import (
     infer_thumbnail_backend_label,
     suggested_action_for_preview,
 )
+from meshcorral.ui.font_scaling import normalize_combo_box_fonts
 from meshcorral.ui.settings_dialog import SettingsDialog
 from meshcorral.ui.theme import apply_theme_palette, build_app_stylesheet
 from meshcorral.ui.error_actions import (
@@ -581,7 +588,9 @@ class MainWindow(QMainWindow):
         self._tag_service = TagService()
         self._favorite_service = FavoriteService()
         from meshcorral.ui.collections.collection_controller import CollectionController
+        from meshcorral.ui.housekeeping.controller import HousekeepingController
         self._collections = CollectionController(self)
+        self._housekeeping = HousekeepingController(self)
 
         # Guards the Asset Mode handler from clobbering restored state during the
         # construction / restore pass — only user-initiated changes should clear rows.
@@ -597,6 +606,7 @@ class MainWindow(QMainWindow):
         self._selected_source_path: str = ""
         self._current_source: str = ""
         self._unavailable_source_text: str = ""
+        self._warm_catalog_active = False
         self._is_scanning: bool = False
         self._scan_thread: QThread | None = None
         self._scan_runner: FolderScanRunner | None = None
@@ -720,9 +730,6 @@ class MainWindow(QMainWindow):
         )
         self._gallery_list.viewport().installEventFilter(self._gallery_scroll_filter)
         self._sync_gallery_icon_and_grid()
-        # One disk scan after both table and gallery models are wired (avoids a no-op refresh
-        # before ``set_gallery_model`` and duplicate refresh_index later in startup).
-        self._thumb_controller.refresh_index()
 
         self._view_stack = QStackedWidget()
         self._view_stack.addWidget(self._table)
@@ -879,7 +886,21 @@ class MainWindow(QMainWindow):
         if not self._layout_manager.restore_session_to_window(self):
             pass
         QTimer.singleShot(450, self._maybe_autotrim_bridge_storage_at_startup)
-        self._restore_persisted_source()
+        # Idle launch: do not activate the previous source or auto-scan / warm-verify.
+        # ``paths/last_scan_folder`` stays in QSettings (and ``_last_scan_folder``) so
+        # Browse can start in the recent folder and manual open still warm-reopens.
+        # Skip the full thumbnail index walk when a complete catalog exists for that
+        # recent folder — gallery is empty until the user opens a source anyway.
+        warm_catalog_known = bool(self._last_scan_folder) and (
+            self._ensure_metadata_cache().has_complete_source(
+                self._last_scan_folder,
+                self._include_subfolders_checkbox.isChecked(),
+                supported_extensions_for_asset_mode(self._asset_mode),
+            )
+        )
+        if not warm_catalog_known:
+            self._thumb_controller.refresh_index()
+        self._begin_idle_session()
         self._refresh_source_button_states()
         self._update_ui_state()
         self._update_status("Ready")
@@ -888,11 +909,12 @@ class MainWindow(QMainWindow):
         self._scan_cancel_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         self._scan_cancel_shortcut.setEnabled(False)
         self._scan_cancel_shortcut.activated.connect(self._on_escape_cancel_scan)
-        # Construction + restore are done; subsequent Asset Mode changes are user-driven.
+        # Construction + idle session are done; subsequent Asset Mode changes are user-driven.
         self._is_initializing_ui = False
         self._wire_tag_ui()
         self._wire_favorite_ui()
         self._collections.wire()
+        self._housekeeping.wire()
 
     def _wire_favorite_ui(self) -> None:
         """Connect Tier 2.2 favorite star toggle."""
@@ -907,6 +929,7 @@ class MainWindow(QMainWindow):
         self._apply_filters(refresh_inspector=False)
         self._refresh_favorite_toggle_for_selection()
         self._collections.refresh_selection()
+        self._housekeeping.refresh_selection()
 
     def _refresh_favorite_toggle_for_selection(self) -> None:
         records = self.selected_records()
@@ -1058,6 +1081,10 @@ class MainWindow(QMainWindow):
                         pass
             except Exception:  # noqa: BLE001
                 pass
+
+        # Re-polishing restores the stylesheet's pixel font, so restate combo box fonts on
+        # the point axis afterwards (Qt reads a point size when opening a drop-down popup).
+        normalize_combo_box_fonts(self)
 
     def _rebuild_layout_load_menu(self) -> None:
         """Refresh user-named entries under Load layout."""
@@ -1284,9 +1311,23 @@ class MainWindow(QMainWindow):
         self._thumb_pixel_combo.setMinimumHeight(CONTROL_HEIGHT)
 
     def _build_left_panel(self) -> QFrame:
+        from PySide6.QtWidgets import QLayout, QStyle
         left_frame = self._make_panel()
-        left_frame.setMinimumWidth(220)
-        left_v = QVBoxLayout(left_frame)
+        # Preserve the existing usable width when the vertical scrollbar appears.
+        left_frame.setMinimumWidth(220 + self.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent))
+        # Additive sections must scroll instead of compressing their controls.
+        outer = QVBoxLayout(left_frame)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._left_content_scroll = QScrollArea()
+        self._left_content_scroll.setWidgetResizable(True)
+        self._left_content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._left_content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_content = QWidget()
+        left_content.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+        left_v = QVBoxLayout(left_content)
+        left_v.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self._left_content_scroll.setWidget(left_content)
+        outer.addWidget(self._left_content_scroll)
         left_v.setContentsMargins(PANEL_MARGIN, PANEL_MARGIN, PANEL_MARGIN, PANEL_MARGIN)
         left_v.setSpacing(LEFT_PANEL_SPACING)
 
@@ -1423,6 +1464,7 @@ class MainWindow(QMainWindow):
 
         left_v.addSpacing(LEFT_SECTION_BREAK)
         left_v.addWidget(self._collections.sidebar)
+        left_v.addWidget(self._housekeeping.sidebar)
         left_v.addStretch(1)
         return left_frame
 
@@ -1901,6 +1943,7 @@ class MainWindow(QMainWindow):
         self._refresh_tag_editor_for_selection()
         self._refresh_favorite_toggle_for_selection()
         self._collections.refresh_selection()
+        self._housekeeping.refresh_selection()
         self._sync_center_welcome_vs_browser()
         self._refresh_status_counts_strip()
 
@@ -2542,7 +2585,7 @@ class MainWindow(QMainWindow):
             return False
 
     def _persist_selected_source(self, folder: str) -> None:
-        """Record the user's source choice and persist it (does not start a scan)."""
+        """Persist source choice and reopen an existing complete catalog."""
         folder = folder.strip()
         if not folder:
             return
@@ -2552,6 +2595,19 @@ class MainWindow(QMainWindow):
         QSettings().setValue("paths/last_scan_folder", folder)
         self._update_source_label()
         self._refresh_source_button_states()
+        QTimer.singleShot(0, self._reopen_completed_source)
+
+    def _reopen_completed_source(self) -> None:
+        """Schedule only known catalogs; first-time folders retain Scan Source UX."""
+        if self._shutting_down or self._is_scanning or self._scan_launch_pending:
+            return
+        source = self._selected_source_path
+        if not source:
+            return
+        cache = self._ensure_metadata_cache()
+        if cache.has_complete_source(source, self._include_subfolders_checkbox.isChecked(),
+                                     supported_extensions_for_asset_mode(self._asset_mode)):
+            self._run_scan(source)
 
     def _refresh_source_button_states(self) -> None:
         """Sync Browse / Scan tooltips and Scan enabled state with selected source."""
@@ -2572,9 +2628,27 @@ class MainWindow(QMainWindow):
         if not self._is_scanning:
             self._scan_source_btn.setEnabled(valid)
 
+    def _begin_idle_session(self) -> None:
+        """
+        Start with no active source loaded (empty gallery / table).
+
+        Preserves ``_last_scan_folder`` / ``paths/last_scan_folder`` for Browse
+        dialog start path and manual warm-reopen. Does not set
+        ``_selected_source_path`` or schedule a scan.
+        """
+        self._selected_source_path = ""
+        self._current_source = ""
+        self._unavailable_source_text = ""
+        self._update_source_label()
+        self._refresh_source_button_states()
+
     def _restore_persisted_source(self) -> None:
         """
         Re-populate the Source panel from ``paths/last_scan_folder`` without auto-scanning.
+
+        Kept for tests and callers that want to surface the recent path as the
+        selected source. Fresh application launch uses :meth:`_begin_idle_session`
+        instead so startup stays idle until the user Browses or Scans.
 
         - Existing folder: ``_selected_source_path`` is set and the label shows the path.
           ``_current_source`` (the source backing the active rows) stays empty because
@@ -2614,6 +2688,8 @@ class MainWindow(QMainWindow):
 
     def _filter_status_message(self, match_count: int) -> str:
         """Workflow label after a filter pass."""
+        if self._warm_catalog_active and self._is_scanning:
+            return "Verifying source…"
         query = (self._search_edit.text() or "").strip()
         indexed = len(self._all_records)
         workflow, suffix = format_filter_footer(
@@ -2863,8 +2939,10 @@ class MainWindow(QMainWindow):
         """
         Browse Source button handler — pick or change the scan target folder.
 
-        Updates ``_selected_source_path`` and persists to QSettings but does **not**
-        start a scan; the user must click Scan Source explicitly.
+        Updates ``_selected_source_path`` and persists to QSettings. If the folder
+        already has a complete warm catalog, :meth:`_reopen_completed_source`
+        schedules a warm verify (cached rows first). First-time folders still
+        require an explicit Scan Source click.
         """
         folder = QFileDialog.getExistingDirectory(
             self,
@@ -3115,6 +3193,16 @@ class MainWindow(QMainWindow):
             return False, "Manual-only thumbnail preference", BridgeEnqueueReject.NOT_ROUTED
 
         source_path = thumbnail_path_for_record(record)
+        if for_auto_enqueue and self._is_known_non_renderable_record(record, source_path):
+            # Silent by design: this file already failed for a permanent reason.
+            return (
+                False,
+                "Known non-renderable file; automatic thumbnail skipped.",
+                BridgeEnqueueReject.NOT_ROUTED,
+            )
+        if not for_auto_enqueue and origin in (JobOrigin.MANUAL_SINGLE, JobOrigin.MANUAL_BATCH):
+            self._forget_non_renderable_source(source_path)
+
         plan = route_thumbnail(
             source_path,
             self._settings_service,
@@ -3519,6 +3607,8 @@ class MainWindow(QMainWindow):
 
     def _run_viewport_thumb_pass(self) -> None:
         """Visible-first health resolve and thumbnail queue/decode after debounce/settle."""
+        if self._warm_catalog_active and self._is_scanning:
+            return
         if self._shutting_down:
             return
         self._resolve_visible_thumb_health()
@@ -3571,6 +3661,7 @@ class MainWindow(QMainWindow):
         if self._shutting_down:
             return
         self._prime_ready_cache_from_metadata_cache()
+        self._prime_non_renderable_from_metadata_cache()
         emit_all = not self._prime_perf_active
         self._thumb_controller.refresh_index(emit_rows=emit_all)
         if self._prime_perf_active:
@@ -3757,6 +3848,7 @@ class MainWindow(QMainWindow):
             "favorite_filter": self._favorite_filter_combo.currentText(),
             "is_favorite_for": self._favorite_service.is_favorite_record,
             "collection_filter": self._collections.filter_predicate(),
+            "housekeeping_filter": self._housekeeping.filter_predicate(),
         }
 
     def _scan_filter_kwargs(self) -> dict[str, object]:
@@ -3813,6 +3905,110 @@ class MainWindow(QMainWindow):
             renderer_version="blender_bridge",
             enriched=rec.is_metadata_enriched() if rec is not None else False,
         )
+
+    def _is_known_non_renderable_record(
+        self,
+        record: FileRecord,
+        source_path: Path,
+    ) -> bool:
+        """
+        True when an automatic thumbnail request must skip Blender for *record*.
+
+        Uses the persisted negative result plus the record's scanned size/mtime, so an
+        edited file falls out of the cache and is retried. No stat is issued here: the
+        gate runs on every viewport enqueue pass.
+        """
+        if not is_tracked_non_renderable_extension(source_path):
+            return False
+        cache = self._metadata_cache
+        if cache is None:
+            return False
+        entry = cache.non_renderable_thumb(source_path)
+        blocked = non_renderable_blocks_auto_enqueue(
+            entry,
+            size_bytes=record.size_bytes,
+            modified_time=record.modified_time,
+        )
+        if blocked:
+            self._thumb_controller.mark_non_renderable(source_path)
+        elif entry is not None:
+            # Fingerprint moved on: drop the stale marker so Blender may try again.
+            self._forget_non_renderable_source(source_path)
+        return blocked
+
+    def _forget_non_renderable_source(self, source_path: Path) -> None:
+        """Clear persisted and in-memory non-renderable state for *source_path*."""
+        if not is_tracked_non_renderable_extension(source_path):
+            return
+        self._thumb_controller.clear_non_renderable(source_path)
+        cache = self._metadata_cache
+        if cache is None:
+            return
+        if cache.clear_non_renderable_thumb(source_path):
+            self._lazy_thumb_health.invalidate_key(_norm_path_key(source_path))
+
+    def _record_non_renderable_result(self, result: BridgeJobResult) -> None:
+        """
+        Persist a high-confidence non-renderable verdict for a failed thumbnail job.
+
+        Transient failures (crash, timeout, permission/IO, missing outputs, unknown
+        importer exceptions) are classified as ``None`` and stay retryable.
+        """
+        if not result.source_file:
+            return
+        cache = self._metadata_cache
+        if cache is None:
+            return
+        verdict = classify_non_renderable_result(result)
+        if verdict is None:
+            return
+        source_path = Path(result.source_file)
+        fingerprint = fingerprint_for_path(source_path)
+        if fingerprint is None:
+            return
+        cache.record_non_renderable_thumb(
+            path=source_path,
+            reason=verdict.reason.value,
+            detail=verdict.detail,
+            size_bytes=fingerprint.size_bytes,
+            modified_time=fingerprint.modified_time,
+        )
+        self._thumb_controller.mark_non_renderable(source_path)
+        self._lazy_thumb_health.invalidate_key(_norm_path_key(source_path))
+
+    def _prime_non_renderable_from_metadata_cache(self) -> int:
+        """
+        Seed the paint-safe non-renderable key set from SQLite for the current view.
+
+        Returns how many rows are still non-renderable (fingerprint unchanged).
+        """
+        cache = self._metadata_cache
+        if cache is None:
+            return 0
+        tracked = [
+            r for r in self._all_records if is_tracked_non_renderable_extension(r.path)
+        ]
+        if not tracked:
+            self._thumb_controller.set_non_renderable_keys(())
+            return 0
+        by_key = {_norm_path_key(r.path): r for r in tracked}
+        keys: list[str] = []
+        for entry in cache.non_renderable_thumbs_for_paths([r.path for r in tracked]):
+            record = by_key.get(entry.path_key)
+            if record is None:
+                continue
+            if entry.matches_fingerprint(
+                size_bytes=record.size_bytes,
+                modified_time=record.modified_time,
+            ):
+                keys.append(entry.path_key)
+        self._thumb_controller.set_non_renderable_keys(keys)
+        if keys:
+            logger.info(
+                "metadata cache primed %s known non-renderable thumbnail row(s)",
+                len(keys),
+            )
+        return len(keys)
 
     def _prime_ready_cache_from_metadata_cache(self) -> int:
         """
@@ -4275,6 +4471,33 @@ class MainWindow(QMainWindow):
         """True when scan worker signals belong to a superseded or finished scan."""
         return not self._scan_accept_events
 
+    def _on_warm_catalog_ready(self, catalog: object) -> None:
+        if self._scan_event_is_stale() or self._scan_cancel_pending:
+            return
+        self._warm_catalog_active = True
+        self._all_records = list(catalog.records)
+        self._pre_scan_backup_records = list(self._all_records)
+        self._pre_scan_backup_source = self._pending_scan_path
+        self._current_source = self._pending_scan_path
+        self._thumb_filter_combo.blockSignals(True)
+        self._thumb_filter_combo.setCurrentText(self._pre_scan_thumb_filter)
+        self._thumb_filter_combo.blockSignals(False)
+        self._refresh_folder_options()
+        self._update_prime_perf_mode()
+        self._apply_filters(preserve_selection=True, refresh_inspector=False)
+        self._update_status("Verifying source…", show_view_counts=True)
+
+    def _on_warm_catalog_reconciled(self, records: object) -> None:
+        if self._scan_event_is_stale():
+            return
+        # Object reuse identifies unchanged rows; retain their thumbnail caches.
+        verified = {str(rec.path): rec for rec in records}
+        for previous in self._all_records:
+            if verified.get(str(previous.path)) is not previous:
+                self._thumb_controller.invalidate_changed_source(previous.path)
+        # One authoritative replacement; verification batches never append duplicates.
+        self._all_records = list(records)
+
     def _on_scan_worker_batch(self, batch: object) -> None:
         """Main thread: absorb one batch of scanned records into models (filtered slice)."""
         if self._scan_event_is_stale() or self._scan_cancel_pending:
@@ -4307,6 +4530,7 @@ class MainWindow(QMainWindow):
         self._restore_pre_scan_working_set()
         self._pending_scan_path = ""
         self._last_scan_elapsed_s = None
+        self._warm_catalog_active = False
         self._is_scanning = False
         self._scan_cancel_pending = False
         self._stop_scan_heartbeat_timer()
@@ -4324,6 +4548,8 @@ class MainWindow(QMainWindow):
         """Status line fragment while a folder scan is in progress."""
         if self._scan_cancel_pending:
             return format_scan_cancel_pending_footer()
+        if self._warm_catalog_active:
+            return "Verifying source…"
         if still_scanning:
             return format_scan_still_scanning_footer(files_found=files_found)
         return format_scan_footer(
@@ -4394,12 +4620,15 @@ class MainWindow(QMainWindow):
         self._rescan_after_mode_change = False
         self._refresh_folder_options()
         self._update_prime_perf_mode()
-        self._apply_filters(preserve_selection=False)
-        QTimer.singleShot(0, self._deferred_refresh_thumb_index_after_scan)
+        self._apply_filters(preserve_selection=self._warm_catalog_active)
+        if not self._warm_catalog_active:
+            QTimer.singleShot(0, self._deferred_refresh_thumb_index_after_scan)
         self._schedule_auto_thumbnails_after_scan()
         self._schedule_viewport_thumb_pass()
-        self._schedule_metadata_enrichment_after_scan()
+        if not self._warm_catalog_active:
+            self._schedule_metadata_enrichment_after_scan()
         self._update_result_summary_label()
+        self._warm_catalog_active = False
         self._is_scanning = False
         self._scan_cancel_pending = False
         self._scan_user_canceled_hint = False
@@ -4442,6 +4671,7 @@ class MainWindow(QMainWindow):
         self._selected_source_path = source
         self._pending_scan_path = ""
         self._scan_cancel_pending = False
+        self._warm_catalog_active = False
         self._is_scanning = False
         self._scan_user_canceled_hint = True
         self._filter_footer_note = None
@@ -4597,6 +4827,8 @@ class MainWindow(QMainWindow):
         startup_timer = timer or ScanStartupTimer()
         startup_timer.mark("SCAN_RUN_SCAN_BEGIN")
         self._scan_startup_timer = startup_timer
+        self._warm_catalog_active = False
+        self._pre_scan_thumb_filter = self._thumb_filter_combo.currentText()
         self._scan_first_batch_logged = False
         self._scan_first_progress_logged = False
         self._scan_accept_events = False
@@ -4657,6 +4889,7 @@ class MainWindow(QMainWindow):
             network_optimistic=network_like,
             archive_manifest_cache=self._ensure_archive_manifest_cache(),
             scan_cache_diagnostics=self._last_scan_cache_diag,
+            thumbnail_ready_cache=self._thumb_controller.ready_cache(),
         )
         cancel_token = self._scan_cancel_token
         self._scan_timing_session = ScanTimingSession(
@@ -4665,17 +4898,13 @@ class MainWindow(QMainWindow):
             include_subfolders=recursive,
         )
 
-        thr.started.connect(
-            lambda: runner.execute_scan(
-                scan_root,
-                recursive,
-                allowed,
-                lightweight,
-                cache_ctx,
-                cancel_token,
-                self._scan_timing_session,
-            )
+        runner.scan_request = (
+            scan_root, recursive, allowed, lightweight, cache_ctx,
+            cancel_token, self._scan_timing_session,
         )
+        thr.started.connect(runner.run_requested_scan)
+        runner.catalog_ready.connect(self._on_warm_catalog_ready)
+        runner.catalog_reconciled.connect(self._on_warm_catalog_reconciled)
         runner.batch_ready.connect(self._on_scan_worker_batch)
         runner.scan_progress.connect(self._on_scan_worker_progress)
         runner.scan_finished.connect(self._on_scan_worker_finished_ok)
@@ -4922,6 +5151,7 @@ class MainWindow(QMainWindow):
         self._refresh_tag_editor_for_selection()
         self._refresh_favorite_toggle_for_selection()
         self._collections.refresh_selection()
+        self._housekeeping.refresh_selection()
 
     def _update_move_summary(self) -> None:
         # Match move_service.build_move_plan: one plan row per unique path.
@@ -5014,6 +5244,10 @@ class MainWindow(QMainWindow):
 
         self._cancel_active_enrichment(wait_ms=2_000)
         self._stop_geometry_metadata_thread()
+
+        housekeeping = getattr(self, "_housekeeping", None)
+        if housekeeping is not None:
+            housekeeping.close()
 
         collections = getattr(self, "_collections", None)
         if collections is not None:
@@ -5320,6 +5554,7 @@ class MainWindow(QMainWindow):
         self._thumb_filter_combo.setCurrentText(THUMB_FILTER_ALL)
         self._favorite_filter_combo.setCurrentText(FAVORITE_FILTER_ALL)
         self._collections.sidebar.reset()
+        self._housekeeping.sidebar.reset()
         self.category_combo.blockSignals(False)
         self.extension_combo.blockSignals(False)
         self.folder_combo.blockSignals(False)
@@ -5979,6 +6214,7 @@ class MainWindow(QMainWindow):
 
         self._thumb_controller.on_job_result(result, refresh_ui=not suppress_ui)
         self._update_metadata_cache_from_bridge_result(result)
+        self._record_non_renderable_result(result)
         if result.source_file:
             src_key = _norm_path_key(result.source_file)
             self._lazy_thumb_health.invalidate_key(src_key)

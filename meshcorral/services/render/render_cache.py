@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 RENDER_CACHE_DIR = USER_DATA_DIR / "render_cache"
 # Bump when native thumbnail visual style changes (invalidates poor legacy proxy entries).
-THUMBNAIL_STYLE_VERSION: str = "thumbnail_style_v2"
+THUMBNAIL_STYLE_VERSION: str = "thumbnail_style_v4"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +55,6 @@ def build_fingerprint(
 
 
 def cache_entry_for_fingerprint(fingerprint: str) -> RenderCacheEntry:
-    RENDER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     base = RENDER_CACHE_DIR / fingerprint
     return RenderCacheEntry(
         png_path=base.with_suffix(".png"),
@@ -79,22 +80,21 @@ def read_cached_png(
         render_mode=render_mode,
     )
     entry = cache_entry_for_fingerprint(fp)
-    if not entry.png_path.is_file():
-        return None
     try:
         meta = json.loads(entry.meta_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        meta = {}
-    if meta.get("source_path") != str(source_path):
-        return None
-    if int(meta.get("size_bytes", -1)) != int(size_bytes):
-        return None
-    if float(meta.get("mtime", -1.0)) != float(mtime):
-        return None
-    try:
-        return entry.png_path.read_bytes()
-    except OSError as exc:
-        logger.debug("render cache read failed %s: %s", entry.png_path, exc)
+        if not isinstance(meta, dict):
+            return None
+        if meta.get("source_path") != str(source_path):
+            return None
+        if int(meta.get("size_bytes", -1)) != int(size_bytes):
+            return None
+        if float(meta.get("mtime", -1.0)) != float(mtime):
+            return None
+        data = entry.png_path.read_bytes()
+        if meta.get("png_sha256") != hashlib.sha256(data).hexdigest():
+            return None
+        return data if data else None
+    except (OSError, ValueError, TypeError):
         return None
 
 
@@ -136,8 +136,8 @@ def write_cached_png(
         render_mode=render_mode,
     )
     entry = cache_entry_for_fingerprint(fp)
-    entry.png_path.write_bytes(png_bytes)
     meta = {
+        "png_sha256": hashlib.sha256(png_bytes).hexdigest(),
         "source_path": str(source_path),
         "size_bytes": int(size_bytes),
         "mtime": float(mtime),
@@ -147,7 +147,24 @@ def write_cached_png(
         "fingerprint": fp,
     }
     try:
-        entry.meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+        entry.png_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(entry.png_path, png_bytes)
+        _atomic_write(entry.meta_path, json.dumps(meta, indent=2, sort_keys=True).encode("utf-8"))
     except OSError as exc:
         logger.debug("render cache meta write failed: %s", exc)
     return entry
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass

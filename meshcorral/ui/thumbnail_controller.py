@@ -8,7 +8,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, Final
 
 from PySide6.QtCore import QRunnable, QThreadPool, Qt, QSize, Signal, Slot, QObject
@@ -280,6 +280,8 @@ class ThumbnailViewController(QObject):
         self._gallery_decoration_cache_max: int = 4096
         self._queued_keys: set[str] = set()
         self._generating_keys: set[str] = set()
+        # Paint-safe mirror of the persisted negative thumbnail cache (no SQLite in paint).
+        self._non_renderable_keys: set[str] = set()
         # Debug-friendly cache stats (counts only; no heavy introspection).
         self._cache_hits: int = 0
         self._cache_misses: int = 0
@@ -1006,6 +1008,20 @@ class ThumbnailViewController(QObject):
                 continue
             self._ready_cache.mark_ready(src, thumb)
 
+    def invalidate_changed_source(self, source: Path) -> None:
+        """Evict only a verified changed/removed asset from existing memory caches."""
+        key = _norm_path_key(source)
+        self._index.forget_source(source)
+        self._ready_cache.mark_not_ready(source)
+        with self._lock:
+            self._gallery_icon_cache.pop(key, None)
+            self._table_icon_cache.pop(key, None)
+            self._failed_table.discard(key)
+            self._failed_gallery.discard(key)
+            self._non_renderable_keys.discard(key)
+        self._pixmap_lru.remove_matching_prefix(key)
+        self._invalidate_gallery_decoration_for_key(key)
+
     def on_job_result(self, result: BridgeJobResult, *, refresh_ui: bool = True) -> None:
         """
         Call when a bridge job finishes; update the index and optionally refresh UI rows.
@@ -1030,6 +1046,7 @@ class ThumbnailViewController(QObject):
             src = Path(result.source_file)
             if result.status == BridgeJobStatus.COMPLETE:
                 self._ready_cache.mark_from_job_result(result)
+                self.clear_non_renderable(src)
             else:
                 self._ready_cache.mark_not_ready(src)
         t1 = time.perf_counter()
@@ -1382,6 +1399,36 @@ class ThumbnailViewController(QObject):
         """Absolute path to indexed Blender ``thumbnail.png`` if available."""
         return self._index.thumbnail_path_for(record.path)
 
+    def set_non_renderable_keys(self, keys: Iterable[str]) -> None:
+        """
+        Replace the known non-renderable key set (hydrated from the metadata cache).
+
+        Keys are normalized source path keys whose persisted negative result still
+        matches the file's size and mtime.
+        """
+        with self._lock:
+            self._non_renderable_keys = {str(k) for k in keys}
+
+    def mark_non_renderable(self, source: Path) -> None:
+        """Remember that *source* can never produce a thumbnail (no repaint by itself)."""
+        with self._lock:
+            self._non_renderable_keys.add(_norm_path_key(source))
+
+    def clear_non_renderable(self, source: Path) -> None:
+        """Forget the non-renderable marker for *source* (manual regenerate/file change)."""
+        with self._lock:
+            self._non_renderable_keys.discard(_norm_path_key(source))
+
+    def is_known_non_renderable(self, record: FileRecord) -> bool:
+        """True when *record* is marked non-renderable in this session."""
+        with self._lock:
+            return _norm_path_key(record.path) in self._non_renderable_keys
+
+    def non_renderable_count(self) -> int:
+        """How many sources are currently marked non-renderable (diagnostics)."""
+        with self._lock:
+            return int(len(self._non_renderable_keys))
+
     def resolve_thumb_health(self, record: FileRecord) -> ThumbHealth:
         """Eager thumbnail health from the bridge index (no lazy pending state)."""
         ext = (record.extension or record.path.suffix).lower().strip()
@@ -1395,7 +1442,12 @@ class ThumbnailViewController(QObject):
             if self._ready_cache.is_ready(record.path):
                 return ThumbHealth.PENDING
             return ThumbHealth.PENDING
-        return self._index.thumb_health(record)
+        health = self._index.thumb_health(record)
+        if health == ThumbHealth.HAS_THUMBNAIL:
+            return health
+        if self.is_known_non_renderable(record):
+            return ThumbHealth.UNSUPPORTED
+        return health
 
     def thumb_health(self, record: FileRecord) -> ThumbHealth:
         """Thumbnail coverage for *record* (index + extension; image decode errors do not apply)."""

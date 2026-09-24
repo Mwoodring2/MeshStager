@@ -80,6 +80,14 @@ class BlenderThumbPathIndex:
         self._source_to_metadata.clear()
         self._failures.clear()
 
+    def forget_source(self, source: str | Path) -> None:
+        """Forget a changed source in memory without deleting any disk cache."""
+        key = _norm_path_key(source)
+        self._source_to_thumb.pop(key, None)
+        self._source_mtime.pop(key, None)
+        self._source_to_metadata.pop(key, None)
+        self._failures.pop(key, None)
+
     def refresh(self) -> int:
         """
         Rebuild from ``result.json`` files under the bridge output root.

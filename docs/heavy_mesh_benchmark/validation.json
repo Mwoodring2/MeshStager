@@ -1,0 +1,60 @@
+{
+  "meshstager-heavy-focused-final.log": {
+    "summary": [
+      "Ran 249 tests in 50.495s",
+      "OK"
+    ],
+    "warning_matches": {
+      "QThread:": 0,
+      "QFont::": 0,
+      "Traceback": 0,
+      "has been deleted": 0,
+      "QObject::": 0,
+      "QWidget::": 0,
+      "QWidget:": 0,
+      "Internal C++": 0
+    },
+    "failures": 0,
+    "skips": []
+  },
+  "meshstager-heavy-timing-final.log": {
+    "summary": [
+      "Ran 41 tests in 1.117s",
+      "OK"
+    ],
+    "warning_matches": {
+      "QThread:": 0,
+      "QFont::": 0,
+      "Traceback": 0,
+      "has been deleted": 0,
+      "QObject::": 0,
+      "QWidget::": 0,
+      "QWidget:": 0,
+      "Internal C++": 0
+    },
+    "failures": 0,
+    "skips": []
+  },
+  "meshstager-heavy-full-final.log": {
+    "summary": [
+      "Ran 793 tests in 839.131s",
+      "OK (skipped=2)"
+    ],
+    "warning_matches": {
+      "QThread:": 0,
+      "QFont::": 0,
+      "Traceback": 0,
+      "has been deleted": 0,
+      "QObject::": 0,
+      "QWidget::": 0,
+      "QWidget:": 0,
+      "Internal C++": 0
+    },
+    "failures": 0,
+    "skips": [
+      "setUpClass (meshcorral.tests.test_acceptance_v1_fixture.TestAcceptanceV1Fixture) ... skipped 'TestSource and/or TestDestination missing under repo root; create them before running acceptance tests.'",
+      "Sizing must use the parent's screen work area, not the primary screen's. ... skipped 'single-monitor host; covered synthetically by clamp tests'",
+      "OK (skipped=2)"
+    ]
+  }
+}

@@ -131,6 +131,10 @@ class InspectorTabbedPanel(QWidget):
         """User tag editor on the Metadata tab."""
         return self._metadata.tag_editor
 
+    def housekeeping_editor(self):
+        """Generated findings controls in the existing Metadata tab."""
+        return self._metadata.housekeeping_editor
+
     def collection_editor(self):
         """Collection membership controls in Metadata."""
         return self._metadata.collection_editor

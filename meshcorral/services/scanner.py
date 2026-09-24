@@ -86,6 +86,7 @@ def iter_scan_file_records(
     scan_cache_diagnostics: ScanCacheDiagnostics | None = None,
     cancel_token: ScanCancelToken | None = None,
     scan_timing: "ScanTimingSession | None" = None,
+    strict_errors: bool = False,
 ) -> Iterator[FileRecord]:
     """Yield matching :class:`~meshcorral.models.file_record.FileRecord` entries while walking disk.
 
@@ -169,6 +170,8 @@ def iter_scan_file_records(
                 try:
                     stat = path.stat()
                 except OSError:
+                    if strict_errors:
+                        raise
                     return None
                 size_bytes = int(stat.st_size)
                 modified_time = float(stat.st_mtime)
@@ -201,9 +204,13 @@ def iter_scan_file_records(
                 metadata_source=metadata_source,
             )
 
+    def traversal_error(error: OSError) -> None:
+        if strict_errors:
+            raise error
+
     if recursive:
         try:
-            for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=traversal_error):
                 if canceled():
                     return
                 dirnames[:] = [d for d in dirnames if d not in IGNORED_DIRNAMES]
@@ -230,6 +237,8 @@ def iter_scan_file_records(
                     yield rec
                 notify_dir_finished(base)
         except OSError:
+            if strict_errors:
+                raise
             logger.debug("recursive scan stopped early under %s", root, exc_info=True)
     else:
         try:
@@ -241,6 +250,8 @@ def iter_scan_file_records(
                         if not entry.is_file(follow_symlinks=False):
                             continue
                     except OSError:
+                        if strict_errors:
+                            raise
                         continue
                     entry_path = Path(entry.path)
                     _maybe_index_archive(
@@ -256,6 +267,8 @@ def iter_scan_file_records(
                     yield rec
             notify_dir_finished(root)
         except OSError:
+            if strict_errors:
+                raise
             logger.debug("non-recursive scan failed under %s", root, exc_info=True)
 
 

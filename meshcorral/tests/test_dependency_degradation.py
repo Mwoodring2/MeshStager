@@ -147,6 +147,7 @@ class TestEnqueueDegradation(unittest.TestCase):
         window._map_native_reject = MainWindow._map_native_reject
         window._show_native_degraded_footer_once = MagicMock()
         window.statusBar = MagicMock(return_value=MagicMock())
+        window._is_known_non_renderable_record.return_value = False
 
         with patch(
             "meshcorral.services.thumbnails.thumbnail_routing_policy.find_blender_executable",

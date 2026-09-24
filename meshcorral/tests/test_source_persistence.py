@@ -4,9 +4,10 @@ These tests focus on the behaviours that regressed after v0.7:
 
 * The Asset Mode handler must not clear ``_current_source`` during construction /
   restore — only an *intentional* user mode change is allowed to wipe the source.
-* The last scanned folder must be restored into the Source panel after launch.
-* If the persisted folder no longer exists, the panel shows
-  ``"Last source unavailable: <path>"`` instead of crashing or auto-clearing.
+* Fresh launch stays idle: ``paths/last_scan_folder`` is kept for Browse, but the
+  Source panel is not auto-activated and no scan starts.
+* :meth:`MainWindow._restore_persisted_source` still surfaces a recent path when
+  called explicitly (manual restore helper).
 
 The tests build a real :class:`MainWindow` but use a private :class:`QSettings`
 scope (``QCoreApplication.setApplicationName`` per-test) so they never write to
@@ -71,29 +72,42 @@ class TestSourcePersistence(unittest.TestCase):
 
         return MainWindow()
 
-    def test_existing_persisted_source_restored_into_label(self) -> None:
-        """Existing folder → ``_selected_source_path`` is set, label shows the path.
-
-        ``_current_source`` stays empty because no scan has run yet at restore time
-        (Asset-Mode-switch fix: selection is decoupled from working rows).
-        """
+    def test_fresh_launch_stays_idle_despite_persisted_source(self) -> None:
+        """Persisted folder is remembered for Browse, but not activated on launch."""
         with _SettingsSandbox() as sb, tempfile.TemporaryDirectory() as td:
             sb.set_last_scan_folder(td)
             window = self._make_window()
             try:
-                self.assertEqual(window._selected_source_path, td)
+                self.assertEqual(window._last_scan_folder, td)
+                self.assertEqual(window._selected_source_path, "")
                 self.assertEqual(window._current_source, "")
-                self.assertEqual(window._source_path_label.text(), td)
+                self.assertEqual(window._source_path_label.text(), "No source selected")
                 self.assertFalse(window._is_initializing_ui)
+                self.assertEqual(window._model.rowCount(), 0)
             finally:
                 window.close()
 
-    def test_missing_persisted_source_shows_unavailable_banner(self) -> None:
+    def test_restore_persisted_source_helper_surfaces_existing_folder(self) -> None:
+        """Explicit helper still populates the Source panel without scanning."""
+        with _SettingsSandbox() as sb, tempfile.TemporaryDirectory() as td:
+            sb.set_last_scan_folder(td)
+            window = self._make_window()
+            try:
+                window._restore_persisted_source()
+                self.assertEqual(window._selected_source_path, td)
+                self.assertEqual(window._current_source, "")
+                self.assertEqual(window._source_path_label.text(), td)
+            finally:
+                window.close()
+
+    def test_restore_persisted_source_helper_missing_folder_banner(self) -> None:
         with _SettingsSandbox() as sb:
             missing = str(Path(tempfile.gettempdir()) / f"never-exists-{uuid.uuid4().hex}")
             sb.set_last_scan_folder(missing)
             window = self._make_window()
             try:
+                window._last_scan_folder = missing
+                window._restore_persisted_source()
                 self.assertEqual(window._current_source, "")
                 self.assertIn(
                     "Last source unavailable",

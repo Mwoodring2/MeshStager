@@ -79,7 +79,7 @@ class TestThumbnailStyleCache(unittest.TestCase):
 
         legacy = hashlib.sha256(legacy_raw.encode("utf-8")).hexdigest()[:32]
         self.assertNotEqual(fp, legacy)
-        self.assertEqual(THUMBNAIL_STYLE_VERSION, "thumbnail_style_v2")
+        self.assertEqual(THUMBNAIL_STYLE_VERSION, "thumbnail_style_v4")
 
     def test_mode_separates_cache_keys(self) -> None:
         base = dict(

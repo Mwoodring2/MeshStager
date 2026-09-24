@@ -143,13 +143,15 @@ class TestBrowseScanButtons(unittest.TestCase):
             finally:
                 window.close()
 
-    def test_persisted_source_restores_and_enables_scan(self) -> None:
+    def test_persisted_source_does_not_auto_enable_scan_on_launch(self) -> None:
+        """Fresh launch stays idle even when last_scan_folder is set."""
         with _SettingsSandbox(), tempfile.TemporaryDirectory() as td:
             QSettings().setValue("paths/last_scan_folder", td)
             window = self._make_window()
             try:
-                self.assertEqual(window._selected_source_path, td)
-                self.assertTrue(window._scan_source_btn.isEnabled())
+                self.assertEqual(window._selected_source_path, "")
+                self.assertFalse(window._scan_source_btn.isEnabled())
+                self.assertEqual(window._last_scan_folder, td)
             finally:
                 window.close()
 

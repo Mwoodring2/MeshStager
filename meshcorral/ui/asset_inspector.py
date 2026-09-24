@@ -161,6 +161,10 @@ class AssetInspectorPanel(QWidget):
         """User tag editor on the Metadata tab."""
         return self._tabbed.tag_editor()
 
+    def housekeeping_editor(self):
+        """Housekeeping controls in the existing Inspector."""
+        return self._tabbed.housekeeping_editor()
+
     def collection_editor(self):
         """Collection membership controls in Metadata."""
         return self._tabbed.collection_editor()

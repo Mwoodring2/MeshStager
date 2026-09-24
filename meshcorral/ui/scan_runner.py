@@ -50,6 +50,9 @@ def _folder_label_for_progress(scan_root: Path, dir_base: Path) -> str:
 class FolderScanRunner(QObject):
     """Walks folders on a worker thread and forwards batches to the GUI thread."""
 
+    catalog_ready: Signal = Signal(object)
+    catalog_reconciled: Signal = Signal(object)
+
     batch_ready: Signal = Signal(object)
     """Emitted with ``list[FileRecord]`` for each slice (≤ :data:`SCAN_UI_BATCH_SIZE`)."""
 
@@ -64,6 +67,11 @@ class FolderScanRunner(QObject):
 
     scan_canceled: Signal = Signal(float, int)
     """Emitted with *(elapsed_seconds, partial_record_count)* when cooperatively stopped."""
+
+    @Slot()
+    def run_requested_scan(self) -> None:
+        """QObject-bound entry point: Qt dispatches this on the worker thread."""
+        self.execute_scan(*self.scan_request)
 
     @Slot(str, bool, object, bool, object, object, object)
     def execute_scan(
@@ -109,6 +117,32 @@ class FolderScanRunner(QObject):
             finish_timing("canceled")
             self._safe_emit_canceled(time.perf_counter() - t0, matched_total)
 
+        ctx = cache_context if isinstance(cache_context, ScanCacheContext) else None
+        cache = ctx.metadata_cache if ctx else None
+        catalog = None
+        verified: list[FileRecord] = []
+        if canceled():
+            emit_canceled()
+            return
+        if cache is not None:
+            try:
+                catalog = cache.get_records_for_source_root(folder, recursive, allowed_extensions)
+            except Exception:
+                log.warning("Source catalog unavailable; using normal scan", exc_info=False)
+        if catalog is not None:
+            try:
+                self.catalog_ready.emit(catalog)
+            except RuntimeError:
+                return
+            ready = ctx.thumbnail_ready_cache
+            if ready is not None:
+                for source, thumbnail in catalog.thumbnail_hints:
+                    if canceled():
+                        emit_canceled()
+                        return
+                    ready.mark_ready(Path(source), Path(thumbnail))
+        old_records = {str(rec.path): rec for rec in catalog.records} if catalog else {}
+
         try:
             require_existing_directory(scan_root, "Scan folder")
         except ValueError as exc:
@@ -144,20 +178,20 @@ class FolderScanRunner(QObject):
                 label = _folder_label_for_progress(scan_root, dir_base)
                 self._safe_emit_progress(count_so_far, label)
 
-            ctx = cache_context if isinstance(cache_context, ScanCacheContext) else None
             iterator = iter_scan_file_records(
                 folder,
                 recursive=recursive,
                 allowed_extensions=allowed_extensions,  # type: ignore[arg-type]
                 after_dir_scanned=on_dir_closed,
-                lightweight=bool(lightweight),
-                metadata_cache=ctx.metadata_cache if ctx else None,
+                lightweight=bool(lightweight) if catalog is None else False,
+                metadata_cache=None,
                 source_root=ctx.source_root if ctx else "",
                 network_optimistic=bool(ctx.network_optimistic) if ctx else False,
                 archive_manifest_cache=ctx.archive_manifest_cache if ctx else None,
                 scan_cache_diagnostics=ctx.scan_cache_diagnostics if ctx else None,
                 cancel_token=token,
                 scan_timing=timing,
+                strict_errors=cache is not None,
             )
 
             for rec in iterator:
@@ -167,6 +201,12 @@ class FolderScanRunner(QObject):
                     emit_canceled()
                     return
                 matched_total += 1
+                previous = old_records.get(str(rec.path))
+                if previous is not None and (previous.size_bytes, previous.modified_time) == (rec.size_bytes, rec.modified_time):
+                    rec = previous
+                verified.append(rec)
+                if catalog is not None:
+                    continue
                 batch.append(rec)
                 if len(batch) >= SCAN_UI_BATCH_SIZE:
                     if not self._safe_emit_batch(batch):
@@ -185,11 +225,13 @@ class FolderScanRunner(QObject):
 
             if batch and not self._safe_emit_batch(batch):
                 return
+            if cache is not None:
+                if not cache.complete_source_snapshot(folder, recursive, allowed_extensions, verified, canceled=canceled):
+                    emit_canceled()
+                    return
+            if catalog is not None:
+                self.catalog_reconciled.emit(verified)
 
-        except RuntimeError as exc:
-            # Signal source destroyed mid-emit (teardown race).
-            log.debug("scan runner aborted after C++ deletion: %s", exc)
-            return
         except Exception as exc:  # noqa: BLE001 — surface any scan failure to UI
             log.exception("streaming scan failed")
             if timing is not None:

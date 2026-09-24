@@ -48,6 +48,7 @@ def compute_filtered_records(
     favorite_filter: str | None = None,
     is_favorite_for: Callable[[FileRecord], bool] | None = None,
     collection_filter: Callable[[FileRecord], bool] | None = None,
+    housekeeping_filter: Callable[[FileRecord], bool] | None = None,
     collections_for: Callable[[FileRecord], tuple[str, ...]] | None = None,
 ) -> list[FileRecord]:
     """
@@ -68,6 +69,7 @@ def compute_filtered_records(
         favorite_filter=favorite_filter or FAVORITE_FILTER_ALL,
         is_favorite_for=is_favorite_for,
         collection_filter=collection_filter,
+        housekeeping_filter=housekeeping_filter,
     )
     parsed = parse_query(query_text)
     if parsed.is_empty():

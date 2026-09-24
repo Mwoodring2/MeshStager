@@ -40,6 +40,7 @@ from meshcorral.ui.dialog_placement import (
     clamp_dialog_size_to_screen,
     dialog_frame_extra,
 )
+from meshcorral.ui.font_scaling import normalize_combo_box_fonts
 from meshcorral.ui.layout_constants import DIALOG_MIN_WIDTH
 
 
@@ -167,7 +168,12 @@ def finalize_responsive_dialog_show(
     min_width: int,
     min_height: int,
 ) -> None:
-    """Apply geometry clamp, then center over *parent* (call from ``showEvent``)."""
+    """
+    Apply geometry clamp, then center over *parent* (call from ``showEvent``).
+
+    Also restates combo box fonts on the point axis now that the dialog is polished, so the
+    drop-down popups do not hand Qt an invalid point size.
+    """
     apply_responsive_dialog_geometry(
         dialog,
         min_width=min_width,
@@ -175,6 +181,7 @@ def finalize_responsive_dialog_show(
         parent=parent,
     )
     center_dialog_over_parent(dialog, parent)
+    normalize_combo_box_fonts(dialog)
 
 
 def primary_actions_outside_scroll(

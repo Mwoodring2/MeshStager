@@ -33,7 +33,9 @@ dist/
 dist_installer/
 packaged/
 release/
-installer/
+# NOTE: installer/ is deliberately NOT ignored — it holds MeshStager.iss, which is installer
+# *source*, not a build artifact. Ignoring the directory is what silently dropped the original
+# .iss from the repo. Compiled installers land in release/ (and *.exe is ignored below anyway).
 *.egg-info/
 *.spec.bak
 

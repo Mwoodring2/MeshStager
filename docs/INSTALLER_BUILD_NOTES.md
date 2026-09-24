@@ -2,69 +2,118 @@
 
 > Previously **Roundup**. Legacy scripts: `installer/Roundup.iss`, `dist/Roundup/`.
 
+For the full release sequence (portable build → verify → smoke test → installer → install → launch →
+uninstall), see **`docs/BUILD_SHAREABLE_WINDOWS.md`**. This file covers installer specifics only.
+
 ## Overview
 
-The Windows installer packages the existing **PyInstaller onedir** output under `dist/MeshStager/` without changing application behavior.
+The Windows installer packages the existing **PyInstaller onedir** output under `dist/MeshStager/`
+without changing application behavior. It does **not** build the app; the portable build
+(`scripts/build_shareable_windows.py`) does that and verifies the bundle's dependencies.
 
-- **Install location**: `{autopf}\MeshStager` (typically `C:\Program Files\MeshStager` on 64-bit Windows).
-- **User data**: **Not** stored under Program Files. Settings and logs use **`%LOCALAPPDATA%\MeshStager\`** via Qt `QSettings`. Legacy **`%LOCALAPPDATA%\Roundup\`** data is migrated on first launch.
-- **Uninstall**: Removes installed program files under `{app}`; it does **not** need to (and typically should not) delete per-user `%LOCALAPPDATA%` profile data — same as most desktop apps.
+- **Install location**: `{autopf}\MeshStager`. Since RC3 the installer is **per-user**
+  (`PrivilegesRequired=lowest`), so `{autopf}` resolves to `{localappdata}\Programs` — that is
+  **`%LOCALAPPDATA%\Programs\MeshStager`** — and Windows shows **no UAC prompt**. Artists can
+  install without administrator rights or IT involvement.
+- **User data**: **Not** stored with the program. Settings and logs use **`%LOCALAPPDATA%\MeshStager\`**
+  via Qt `QSettings`. Legacy **`%LOCALAPPDATA%\Roundup\`** data is migrated on first launch.
+- **Uninstall**: Removes installed program files under `{app}`. It deliberately does **not** delete
+  per-user `%LOCALAPPDATA%` data — same as most desktop apps, and it keeps settings, caches,
+  thumbnails, and the legacy-Roundup migration intact across a reinstall.
+
+### RC1 → RC3 install-scope change
+
+RC1 installed per-machine into `C:\Program Files\MeshStager` and required elevation. The `AppId` GUID
+is shared across both, which is correct for release continuity but means a per-user install **cannot
+upgrade a per-machine one in place**. Anyone still running the RC1 installer's output should
+uninstall it before installing RC3.
 
 ## Prerequisites
 
-1. Python + project venv (for the frozen EXE): see `scripts/build_exe.bat`.
-2. **[Inno Setup 6](https://jrsoftware.org/isdl.php)** installed (includes **ISCC.exe** Compiler).
-   - `scripts/build_installer.bat` looks for `ISCC.exe` in standard install paths under `Program Files` / `Program Files (x86)`.
+1. The frozen bundle at `dist/MeshStager/` — build it with
+   `.venv\Scripts\python.exe scripts\build_shareable_windows.py --version v0.1.0-rc3`.
+2. **[Inno Setup 6.3+](https://jrsoftware.org/isdl.php)** installed (provides **ISCC.exe**).
+   - Its own installer offers a **non-administrator** install into
+     `%LOCALAPPDATA%\Programs\Inno Setup 6`.
+   - `scripts/build_installer_windows.ps1` finds `ISCC.exe` on `PATH`, via the Inno Setup uninstall
+     registry key (HKCU or HKLM), or in the default directories including the per-user one. Pass
+     `-IsccPath` to override.
 
-## Recommended layout before compiling
+## Payload
 
 Everything under **`dist/MeshStager/`** is recursively installed:
 
 ```
 MeshStager.exe
 _internal\
-README_FIRST.txt
-RELEASE_NOTES_v0.1.md
-QUICK_QA_CHECKLIST.md
-TESTER_HANDOFF_RC1.md
 ```
 
-Optional markdown files are **copied into `dist/MeshStager`** by `scripts/build_installer.bat` when they exist in the repo root. `build_exe.bat` only refreshes **`README_FIRST.txt`**; run the installer script after staging docs as needed.
+`_internal\` is the required PyInstaller runtime, not something testers interact with; no shortcut
+points into it. Nothing else is staged into the payload — earlier versions of the build script copied
+repo markdown (`README_FIRST.txt`, `QUICK_QA_CHECKLIST.md`, `TESTER_HANDOFF_RC1.md`) beside the EXE,
+which exposed internal build/QA instructions to testers. That no longer happens.
 
 ## Build
 
-From the **`Mesh_corral/`** repo root:
+From the repo root:
 
-```bat
-scripts\build_exe.bat
-scripts\build_installer.bat
+```powershell
+.\scripts\build_installer_windows.ps1
 ```
+
+`scripts\build_installer.bat` is a thin wrapper around the same script (kept for muscle memory) so
+the two paths cannot drift.
 
 Output:
 
-- **`dist_installer/MeshStager_Setup_v0.1.0-rc1.exe`** (suffix tracks `installer/MeshStager.iss` `#define MyAppVersion`).
+- **`release/MeshStager_v0.1.0-rc3_Setup.exe`**
+- **`release/MeshStager_v0.1.0-rc3_Setup.exe.sha256.txt`**
 
-To change branding or version for a new release:
+The filename tracks `#define MyAppVersion` in `installer/MeshStager.iss`; the wrapper reads that
+define rather than hardcoding a version, and fails if the compiled artifact does not appear.
 
-- Edit `#define MyAppVersion`, **`AppId`** only if splitting a truly different product lineage (normally keep **one stable `AppId`** per product so upgrades unregister correctly), and `OutputBaseFilename` pattern in **`installer/MeshStager.iss`**.
+To cut a new release, edit `#define MyAppVersion` and `VersionInfoVersion` in
+**`installer/MeshStager.iss`**. Leave **`AppId`** alone (see below). The app's own `APP_VERSION` is
+separate and is not changed by the installer build.
+
+## Source control
+
+`installer/MeshStager.iss` is **build source and must stay tracked**. `.gitignore` previously ignored
+all of `installer/`, which is how the original `.iss` disappeared from the repo (it survived only in
+`_archive_cleanup_2026-06-05_github_ready/prior_archive_2026-06-03/installer/`). The directory is no
+longer ignored; compiled installers land in `release/`, and `*.exe` is ignored globally, so a stray
+Setup.exe cannot be committed by accident.
+
+## Signing
+
+The installer is **unsigned**, so Windows SmartScreen shows *Windows protected your PC* with an
+unknown publisher; testers must click **More info → Run anyway**. Removing that warning requires an
+Authenticode (ideally EV) code-signing certificate applied to both `MeshStager.exe` and the
+Setup.exe. Untracked for RC3.
 
 ## Acceptance / QA checklist
 
 After building:
 
-1. **Install** — confirm default folder `Program Files\MeshStager`.
+1. **Install** — no UAC prompt; app lands in `%LOCALAPPDATA%\Programs\MeshStager`.
 2. **Start Menu** — shortcut launches **`MeshStager.exe`**.
 3. **Desktop** — optional task “Create a desktop shortcut” creates one when checked.
-4. **Launch** — app starts; **`%LOCALAPPDATA%\MeshStager\`** used for persisted settings (theme, paths, etc.).
-5. **Workflow smoke** — **Scan Source**, **Move/Copy**, **Asset Mode**, **Gallery Size** behave like the portable build.
-6. **Uninstall** — Add/Remove Programs removes **`Program Files\MeshStager`**; confirm user data may remain under **`%LOCALAPPDATA%\MeshStager\`** (expected).
+4. **Icon** — window, taskbar, and shortcut show the MeshStager icon.
+5. **Launch** — app starts; **Settings → Native renderer: Ready**.
+6. **Workflow smoke** — Settings dialog, Sort by Type, and scanning behave like the portable build;
+   **`%LOCALAPPDATA%\MeshStager\`** holds persisted settings.
+7. **Uninstall** — Add/Remove Programs entry reads **MeshStager v0.1.0-rc3** and removes
+   `%LOCALAPPDATA%\Programs\MeshStager`; confirm user data **remains** under
+   **`%LOCALAPPDATA%\MeshStager\`** (expected).
 
 ## `AppId` (GUID)
 
-`installer/MeshStager.iss` uses a fixed Inno-style **`AppId`** (inherited from Roundup lineage for upgrade continuity):
+`installer/MeshStager.iss` uses a fixed Inno-style **`AppId`** (inherited from Roundup lineage for
+upgrade continuity):
 
 ```text
 AppId={{B5CF77B4-9884-4964-A6BC-50E6A5327817}
 ```
 
-Do **not** rotate this casually: Windows uses it to correlate installs/uninstalls. Generate a **new** GUID only for a genuinely separate product installer.
+Do **not** rotate this casually: Windows uses it to correlate installs/uninstalls. Generate a **new**
+GUID only for a genuinely separate product installer.

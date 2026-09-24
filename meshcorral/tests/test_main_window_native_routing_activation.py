@@ -66,6 +66,8 @@ def _window_stub(settings: SettingsService) -> MagicMock:
     window._native_degraded_footer_shown = False
     window._map_native_reject = lambda reject: MainWindow._map_native_reject(reject)
     window._show_native_degraded_footer_once = MagicMock()
+    # Nothing is known non-renderable in these routing tests.
+    window._is_known_non_renderable_record.return_value = False
     return window
 
 

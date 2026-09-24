@@ -19,6 +19,7 @@ class ScanCacheContext:
     network_optimistic: bool = False
     archive_manifest_cache: ArchiveManifestCache | None = None
     scan_cache_diagnostics: ScanCacheDiagnostics | None = None
+    thumbnail_ready_cache: object | None = None
 
 
 @dataclass(slots=True)
