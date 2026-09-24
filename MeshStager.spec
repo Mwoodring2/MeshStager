@@ -21,7 +21,8 @@ a = Analysis(
     ['run_frozen.py'],
     pathex=['.'],
     binaries=[],
-    datas=[],
+    # EXE.icon brands the executable; Qt also needs the artwork at runtime.
+    datas=[('assets/icons', 'assets/icons')],
     hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],
     hooksconfig={},

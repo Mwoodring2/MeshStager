@@ -76,7 +76,7 @@ from meshcorral.app.config import (
     read_branded_env_flag,
     supported_extensions_for_asset_mode,
 )
-from meshcorral.app.icon_branding import header_branding_icon_path
+from meshcorral.app.icon_branding import apply_window_icon, header_branding_icon_path
 from meshcorral.app.bridge.auto_thumb_scan import (
     filter_auto_thumbnail_records,
     is_auto_thumbnail_extension,
@@ -560,6 +560,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
+        apply_window_icon(self)
         self.setWindowTitle(APP_NAME)
         self.resize(1280, 780)
 
